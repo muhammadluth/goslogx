@@ -119,23 +119,23 @@ func Warning(ctx context.Context, traceId string, module string, msg string, dat
 	logger.stdout.LogAttrs(ctx, sLevel, msg, attrs...)
 }
 
-func Info(ctx context.Context, traceId string, module string, msgType string, msg string, data any) {
+func Info(ctx context.Context, traceId string, module string, msgType MsgType, msg string, data any) {
 	sLevel := slog.LevelInfo
 	attrs := baseAttrs(traceId, module, msgType, sLevel, data)
 	logger.stdout.LogAttrs(ctx, sLevel, msg, attrs...)
 }
 
-func Debug(ctx context.Context, traceId string, module string, msgType string, msg string, data any) {
+func Debug(ctx context.Context, traceId string, module string, msgType MsgType, msg string, data any) {
 	sLevel := slog.LevelDebug
 	attrs := baseAttrs(traceId, module, msgType, sLevel, data)
 	logger.stdout.LogAttrs(ctx, sLevel, msg, attrs...)
 }
 
-func baseAttrs(traceId string, module string, msgType string, level slog.Level, data any) []slog.Attr {
+func baseAttrs(traceId string, module string, msgType MsgType, level slog.Level, data any) []slog.Attr {
 	attrs := []slog.Attr{
 		slog.String("trace_id", traceId),
 		slog.String("module", module),
-		slog.String("msg_type", msgType),
+		slog.String("msg_type", string(msgType)),
 		severityAttr(level),
 	}
 	if data != nil {
