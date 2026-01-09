@@ -1,34 +1,38 @@
 package goslogx
 
-type HttpDynamicData struct {
-	Host        string `json:"host,omitempty"`
-	Method      string `json:"method,omitempty"`
-	Path        string `json:"path,omitempty"`
-	Type        string `json:"type,omitempty"`
-	StatusCode  int    `json:"status_code,omitempty"`
-	HttpMessage any    `json:"http_message,omitempty"`
+// HTTPRequestData represents context for HTTP interactions
+type HTTPRequestData struct {
+	Method     string              `json:"method,omitempty"`
+	URL        string              `json:"url,omitempty"`
+	StatusCode int                 `json:"status_code,omitempty"`
+	Headers    map[string][]string `json:"headers,omitempty"`
+	Body       any                 `json:"body,omitempty"`
+	ClientIP   string              `json:"client_ip,omitempty"`
 }
 
-type NatsDynamicData struct {
-	Name        string              `json:"name,omitempty"`
-	Type        string              `json:"type,omitempty"`
-	Subject     string              `json:"subject,omitempty"`
-	Stream      string              `json:"stream,omitempty"`
-	Consumer    string              `json:"consumer,omitempty"`
-	NatsHeader  map[string][]string `json:"nats_header,omitempty"`
-	NatsMessage any                 `json:"nats_message,omitempty"`
+// DBData represents context for Database/Cache interactions (Redis, SQL, etc.)
+type DBData struct {
+	Driver     string `json:"driver,omitempty"`
+	Operation  string `json:"operation,omitempty"`
+	Table      string `json:"table,omitempty"`
+	Statement  string `json:"statement,omitempty"`
+	DurationMs int64  `json:"duration_ms,omitempty"`
+	Error      string `json:"error,omitempty"`
 }
 
-type RedisDynamicData struct {
-	Name         string   `json:"name,omitempty"`
-	Type         string   `json:"type,omitempty"`
-	Database     int      `json:"database"`
-	Key          string   `json:"key,omitempty"`
-	Fields       []string `json:"fields,omitempty"`
-	RedisMessage any      `json:"redis_message,omitempty"`
+// MQData represents context for Message Queue interactions (Nats, Kafka, etc.)
+type MQData struct {
+	Driver    string `json:"driver,omitempty"`
+	Operation string `json:"operation,omitempty"`
+	Topic     string `json:"topic,omitempty"`
+	Group     string `json:"group,omitempty"`
+	MessageID string `json:"message_id,omitempty"`
+	Payload   any    `json:"payload,omitempty"`
 }
 
-type XenditDynamicData struct {
-	MessageType string `json:"message_type,omitempty"`
-	Message     any    `json:"message,omitempty"`
+// GenericData for any other context
+type GenericData struct {
+	Service string `json:"service,omitempty"`
+	Action  string `json:"action,omitempty"`
+	Payload any    `json:"payload,omitempty"`
 }

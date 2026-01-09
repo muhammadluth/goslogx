@@ -3,72 +3,80 @@ package goslogx
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"os"
 	"runtime"
 	"strings"
 	"sync"
 
 	"github.com/pkg/errors"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
-var logger Log
+var caller = runtime.Caller
+var log Log
 var once sync.Once
 
 type Log struct {
-	stdout *slog.Logger
-	stderr *slog.Logger
+	logger *zap.Logger
 }
 
 func SetupLog(svcName string) {
 	once.Do(func() {
-		logger = NewLog(svcName)
+		log = NewLog(svcName)
 	})
 }
 
 func NewLog(svcName string) Log {
-	stdout := slog.New(slog.NewJSONHandler(os.Stdout, nil)).
-		With("application_name", svcName)
+	encoderConfig := zap.NewProductionEncoderConfig()
+	encoderConfig.TimeKey = "time"
+	encoderConfig.EncodeTime = zapcore.RFC3339TimeEncoder
 
-	stderr := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
-		AddSource: true,
-	})).With("application_name", svcName)
+	// Create a core that writes to stdout, matching the previous behavior
+	// where all used logging functions wrote to logger.stdout (os.Stdout).
+	core := zapcore.NewCore(
+		zapcore.NewJSONEncoder(encoderConfig),
+		zapcore.Lock(os.Stdout),
+		zapcore.DebugLevel, // Allow all levels
+	)
+
+	l := zap.New(core).With(zap.String("application_name", svcName))
+
 	return Log{
-		stdout: stdout,
-		stderr: stderr,
+		logger: l,
 	}
 }
 
-func severityAttr(level slog.Level) slog.Attr {
+func severityField(level zapcore.Level) zap.Field {
 	var val string
 	switch level {
-	case slog.LevelDebug:
+	case zapcore.DebugLevel:
 		val = "DEBUG"
-	case slog.LevelInfo:
+	case zapcore.InfoLevel:
 		val = "INFO"
-	case slog.LevelWarn:
+	case zapcore.WarnLevel:
 		val = "WARNING"
-	case slog.LevelError:
+	case zapcore.ErrorLevel:
 		val = "ERROR"
-	case slog.LevelError + 1:
+	case zapcore.FatalLevel: // Approximate for Error + 1
 		val = "CRITICAL"
 	default:
 		val = "DEFAULT"
 	}
-	return slog.String("severity", val)
+	return zap.String("severity", val)
 }
 
-func getSourceAttr() slog.Attr {
-	pc, file, line, ok := runtime.Caller(2)
+func getSourceField() zap.Field {
+	pc, file, line, ok := caller(2)
 	if !ok {
-		return slog.Attr{}
+		return zap.Skip()
 	}
 	fn := runtime.FuncForPC(pc)
 	function := "unknown"
 	if fn != nil {
 		function = fn.Name()
 	}
-	return slog.Any("source", map[string]any{
+	return zap.Any("source", map[string]any{
 		"function": function,
 		"file":     file,
 		"line":     line,
@@ -76,72 +84,71 @@ func getSourceAttr() slog.Attr {
 }
 
 func Error(ctx context.Context, traceId string, module string, err error) {
-	sLevel := slog.LevelError
+	sLevel := zapcore.ErrorLevel
 	caused := errors.Cause(err)
 	stack := formatStack(err)
-	attrs := []slog.Attr{
-		slog.String("trace_id", traceId),
-		slog.String("module", module),
-		slog.String("error", caused.Error()),
-		severityAttr(sLevel),
-		slog.String("stack_trace", stack),
-		getSourceAttr(),
+	fields := []zap.Field{
+		zap.String("trace_id", traceId),
+		zap.String("module", module),
+		zap.String("error", caused.Error()),
+		severityField(sLevel),
+		zap.String("stack_trace", stack),
+		getSourceField(),
 	}
-	logger.stdout.LogAttrs(ctx, sLevel, err.Error(), attrs...)
+	log.logger.Log(sLevel, err.Error(), fields...)
 }
 
 func Fatal(ctx context.Context, traceId string, module string, err error) {
-	sLevel := slog.LevelError + 1
+	sLevel := zapcore.FatalLevel
 	caused := errors.Cause(err)
 	stack := formatStack(err)
-	attrs := []slog.Attr{
-		slog.String("trace_id", traceId),
-		slog.String("module", module),
-		slog.String("error", caused.Error()),
-		severityAttr(sLevel),
-		slog.String("stack_trace", stack),
-		getSourceAttr(),
+	fields := []zap.Field{
+		zap.String("trace_id", traceId),
+		zap.String("module", module),
+		zap.String("error", caused.Error()),
+		severityField(sLevel),
+		zap.String("stack_trace", stack),
+		getSourceField(),
 	}
-	logger.stdout.LogAttrs(ctx, sLevel, err.Error(), attrs...)
-	os.Exit(1)
+	log.logger.Log(sLevel, err.Error(), fields...)
 }
 
 func Warning(ctx context.Context, traceId string, module string, msg string, data any) {
-	sLevel := slog.LevelWarn
-	attrs := []slog.Attr{
-		slog.String("trace_id", traceId),
-		slog.String("module", module),
-		severityAttr(sLevel),
+	sLevel := zapcore.WarnLevel
+	fields := []zap.Field{
+		zap.String("trace_id", traceId),
+		zap.String("module", module),
+		severityField(sLevel),
 	}
 	if data != nil {
-		attrs = append(attrs, slog.Any("data", data))
+		fields = append(fields, zap.Any("data", data))
 	}
-	logger.stdout.LogAttrs(ctx, sLevel, msg, attrs...)
+	log.logger.Log(sLevel, msg, fields...)
 }
 
 func Info(ctx context.Context, traceId string, module string, msgType MsgType, msg string, data any) {
-	sLevel := slog.LevelInfo
-	attrs := baseAttrs(traceId, module, msgType, sLevel, data)
-	logger.stdout.LogAttrs(ctx, sLevel, msg, attrs...)
+	sLevel := zapcore.InfoLevel
+	fields := baseFields(traceId, module, msgType, sLevel, data)
+	log.logger.Log(sLevel, msg, fields...)
 }
 
 func Debug(ctx context.Context, traceId string, module string, msgType MsgType, msg string, data any) {
-	sLevel := slog.LevelDebug
-	attrs := baseAttrs(traceId, module, msgType, sLevel, data)
-	logger.stdout.LogAttrs(ctx, sLevel, msg, attrs...)
+	sLevel := zapcore.DebugLevel
+	fields := baseFields(traceId, module, msgType, sLevel, data)
+	log.logger.Log(sLevel, msg, fields...)
 }
 
-func baseAttrs(traceId string, module string, msgType MsgType, level slog.Level, data any) []slog.Attr {
-	attrs := []slog.Attr{
-		slog.String("trace_id", traceId),
-		slog.String("module", module),
-		slog.String("msg_type", string(msgType)),
-		severityAttr(level),
+func baseFields(traceId string, module string, msgType MsgType, level zapcore.Level, data any) []zap.Field {
+	fields := []zap.Field{
+		zap.String("trace_id", traceId),
+		zap.String("module", module),
+		zap.String("msg_type", string(msgType)),
+		severityField(level),
 	}
 	if data != nil {
-		attrs = append(attrs, slog.Any("data", data))
+		fields = append(fields, zap.Any("data", data))
 	}
-	return attrs
+	return fields
 }
 
 func formatStack(err error) string {
