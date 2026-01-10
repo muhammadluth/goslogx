@@ -3,7 +3,7 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/muhammadluth/goslogx.svg)](https://pkg.go.dev/github.com/muhammadluth/goslogx)
 [![Go Report Card](https://goreportcard.com/badge/github.com/muhammadluth/goslogx)](https://goreportcard.com/report/github.com/muhammadluth/goslogx)
 [![Build Status](https://github.com/muhammadluth/goslogx/workflows/Go/badge.svg)](https://github.com/muhammadluth/goslogx/actions)
-[![codecov](https://codecov.io/gh/muhammadluth/goslogx/branch/master/graph/badge.svg)](https://codecov.io/gh/muhammadluth/goslogx)
+[![codecov](https://codecov.io/gh/muhammadluth/goslogx/graph/badge.svg?token=QD1YFY5MC8)](https://codecov.io/gh/muhammadluth/goslogx)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 **GOSLOGX** is a high-performance, structured logging library for Go, built on top of [Uber's Zap](https://github.com/uber-go/zap). It provides a standardized logging format with specialized Data Transfer Objects (DTOs) for common application scenarios like HTTP requests, database operations, and message queue events.
