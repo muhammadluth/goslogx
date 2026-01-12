@@ -106,7 +106,7 @@ func TestLoggingFunctions(t *testing.T) {
 
 	// 2. Test Debug
 	t.Run("Debug", func(t *testing.T) {
-		goslogx.Debug(ctx, traceID, "user-module", goslogx.MESSSAGE_TYPE_EVENT, "debug event", nil)
+		goslogx.Debug(ctx, traceID, "user-module", goslogx.MESSSAGE_TYPE_EVENT, "debug event", map[string]string{"key": "value"})
 	})
 
 	// 3. Test Warning
