@@ -234,7 +234,7 @@ func NewLog(svcName string) Log {
 	// AddCallerSkip(1) is used in logging functions to show the actual caller, not the wrapper
 	logger := zap.New(core,
 		zap.AddCaller(),
-		zap.AddStacktrace(zapcore.ErrorLevel),
+		zap.AddStacktrace(zapcore.FatalLevel),
 	).With(zap.String("application_name", svcName))
 
 	return Log{
