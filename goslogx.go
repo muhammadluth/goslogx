@@ -22,7 +22,6 @@ package goslogx
 
 import (
 	"bytes"
-	"context"
 	"io"
 	"os"
 	"sync"
@@ -268,7 +267,7 @@ func mapSeverity(level zapcore.Level) string {
 //	if err != nil {
 //		goslogx.Error(ctx, "trace-001", "database", err)
 //	}
-func Error(ctx context.Context, traceId string, module string, err error) {
+func Error(traceId string, module string, err error) {
 	// AddCallerSkip(1) ensures the caller of Error() is shown, not Error() itself
 	logger := log.logger.WithOptions(zap.AddCallerSkip(1))
 	sLevel := zapcore.ErrorLevel
@@ -290,7 +289,7 @@ func Error(ctx context.Context, traceId string, module string, err error) {
 //	if criticalErr := initializeDatabase(); criticalErr != nil {
 //		goslogx.Fatal(ctx, "init-001", "database", criticalErr)
 //	}
-func Fatal(ctx context.Context, traceId string, module string, err error) {
+func Fatal(traceId string, module string, err error) {
 	// AddCallerSkip(1) ensures the caller of Fatal() is shown, not Fatal() itself
 	logger := log.logger.WithOptions(zap.AddCallerSkip(1))
 	sLevel := zapcore.FatalLevel
@@ -310,7 +309,7 @@ func Fatal(ctx context.Context, traceId string, module string, err error) {
 //
 //	goslogx.Warning(ctx, "trace-001", "cache", "cache miss rate high",
 //		map[string]interface{}{"miss_rate": 0.45})
-func Warning(ctx context.Context, traceId string, module string, msg string, data any) {
+func Warning(traceId string, module string, msg string, data any) {
 	// AddCallerSkip(1) ensures the caller of Warning() is shown, not Warning() itself
 	logger := log.logger.WithOptions(zap.AddCallerSkip(1))
 	sLevel := zapcore.WarnLevel
@@ -337,7 +336,7 @@ func Warning(ctx context.Context, traceId string, module string, msg string, dat
 //			URL: "/api/v1/users",
 //			StatusCode: 200,
 //		})
-func Info(ctx context.Context, traceId string, module string, msgType MsgType, msg string, data any) {
+func Info(traceId string, module string, msgType MsgType, msg string, data any) {
 	// AddCallerSkip(1) ensures the caller of Info() is shown, not Info() itself
 	logger := log.logger.WithOptions(zap.AddCallerSkip(1))
 	sLevel := zapcore.InfoLevel
@@ -362,7 +361,7 @@ func Info(ctx context.Context, traceId string, module string, msgType MsgType, m
 //
 //	goslogx.Debug(ctx, "trace-001", "parser", goslogx.MESSSAGE_TYPE_IN,
 //		"processing input", map[string]interface{}{"input_len": 1024})
-func Debug(ctx context.Context, traceId string, module string, msgType MsgType, msg string, data any) {
+func Debug(traceId string, module string, msgType MsgType, msg string, data any) {
 	// AddCallerSkip(1) ensures the caller of Debug() is shown, not Debug() itself
 	logger := log.logger.WithOptions(zap.AddCallerSkip(1))
 	sLevel := zapcore.DebugLevel

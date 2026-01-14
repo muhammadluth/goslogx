@@ -2,7 +2,6 @@ package goslogx_test
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"io"
 	"os"
@@ -96,28 +95,27 @@ func TestLoggingFunctions(t *testing.T) {
 	// Initialize the logger (this will pick up the pipe writer as stdout)
 	goslogx.SetupLog("test-service")
 
-	ctx := context.Background()
 	traceID := "trace-123"
 
 	// 1. Test Info
 	t.Run("Info", func(t *testing.T) {
-		goslogx.Info(ctx, traceID, "user-module", goslogx.MESSSAGE_TYPE_IN, "incoming request", map[string]string{"foo": "bar"})
+		goslogx.Info(traceID, "user-module", goslogx.MESSSAGE_TYPE_IN, "incoming request", map[string]string{"foo": "bar"})
 	})
 
 	// 2. Test Debug
 	t.Run("Debug", func(t *testing.T) {
-		goslogx.Debug(ctx, traceID, "user-module", goslogx.MESSSAGE_TYPE_EVENT, "debug event", map[string]string{"key": "value"})
+		goslogx.Debug(traceID, "user-module", goslogx.MESSSAGE_TYPE_EVENT, "debug event", map[string]string{"key": "value"})
 	})
 
 	// 3. Test Warning
 	t.Run("Warning", func(t *testing.T) {
-		goslogx.Warning(ctx, traceID, "user-module", "warning occurred", map[string]int{"attempts": 3})
+		goslogx.Warning(traceID, "user-module", "warning occurred", map[string]int{"attempts": 3})
 	})
 
 	// 4. Test Error
 	t.Run("Error", func(t *testing.T) {
 		err := errors.New("database connection failed")
-		goslogx.Error(ctx, traceID, "db-module", err)
+		goslogx.Error(traceID, "db-module", err)
 	})
 
 	// Close writer to finish capturing
@@ -154,10 +152,9 @@ func TestLoggingFunctions(t *testing.T) {
 func TestFatal(t *testing.T) {
 	if os.Getenv("BE_CRASHER") == "1" {
 		goslogx.SetupLog("crash-service")
-		ctx := context.Background()
 		traceID := "crash-trace"
 		err := errors.New("critical failure")
-		goslogx.Fatal(ctx, traceID, "main", err)
+		goslogx.Fatal(traceID, "main", err)
 		return
 	}
 
