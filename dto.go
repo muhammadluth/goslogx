@@ -2,6 +2,7 @@ package goslogx
 
 // HTTPData captures context for HTTP interactions.
 // It provides a structured schema for logging request/response and client metadata.
+// Sensitive fields in Body (JSON) and Headers are automatically masked.
 //
 // Example:
 //

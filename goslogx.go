@@ -1,35 +1,50 @@
 // Package goslogx provides a high-performance, structured logging wrapper around zap.
-// It features zero-allocation field masking, custom stack trace formatting,
+// It features automatic field masking, custom stack trace formatting,
 // and pre-defined DTOs for common logging scenarios.
 //
-// Usage:
+// Basic Usage:
 //
-//	goslogx.SetupLog("my-service", '*')
-//	goslogx.Info("trace-001", "handler", goslogx.MESSSAGE_TYPE_EVENT, "request received", nil)
+//	logger, err := goslogx.New(goslogx.WithServiceName("my-service"))
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//	logger.Info("trace-001", "handler", goslogx.MessageTypeEvent, "request received", nil)
 package goslogx
 
 import (
 	"bytes"
-	"fmt"
 	"io"
-	"os"
-	"reflect"
-	"strings"
 	"sync"
+	"sync/atomic"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
 
-var log Log
-var once sync.Once
+var (
+	// globalLog project global logger using atomic pointer for thread-safety.
+	globalLog atomic.Pointer[Logger]
+	// once ensures New() only configures the global logger once.
+	once sync.Once
+)
 
-// Log wraps zap.Logger with custom formatting, stack trace support, and optional field masking.
-// Field masking uses a configurable mask character for fields tagged with `masked:"true"`.
-type Log struct {
-	logger         *zap.Logger
-	maskChar       rune // Character used for masking (e.g., '*', 'x', '#')
-	maskingEnabled bool // Whether masking is enabled
+func init() {
+	// Initialize with default logger so it's always ready to use.
+	globalLog.Store(setupLog())
+}
+
+// Logger wraps zap.Logger with custom formatting and stack trace support.
+// Create a new Logger using New() with functional options.
+//
+// Example:
+//
+//	logger, err := goslogx.New(
+//		goslogx.WithServiceName("my-service"),
+//		goslogx.WithLevel(zapcore.DebugLevel),
+//	)
+type Logger struct {
+	logger *zap.Logger
+	config *Config
 }
 
 // formatStackTraceBytes formats a stack trace string into a compact, bracketed format.
@@ -128,14 +143,24 @@ func (w *stackTraceFormattingWriter) Write(p []byte) (n int, err error) {
 //
 // Example: "hello\nworld\t\"test\"" -> "hello
 // world	"test""
+
+var decodeBufPool = sync.Pool{
+	New: func() any {
+		return new(bytes.Buffer)
+	},
+}
+
 func decodeJSONString(b []byte) string {
 	// Optimization: if there are no backslashes, return immediately
 	if !bytes.Contains(b, []byte("\\")) {
 		return string(b)
 	}
 
+	buf := decodeBufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer decodeBufPool.Put(buf)
+
 	// Process escape sequences byte by byte
-	var buf bytes.Buffer
 	for i := 0; i < len(b); i++ {
 		if b[i] == '\\' && i+1 < len(b) {
 			next := b[i+1]
@@ -172,28 +197,33 @@ func (w *stackTraceFormattingWriter) Sync() error {
 	return nil
 }
 
-// SetupLog initializes the global logger instance with the given service name and optional masking character.
-// This function is idempotent and thread-safe - subsequent calls will be ignored.
-//
-// Parameters:
-//   - svcName: The name of the service for log identification
-//   - maskChar: Character used for masking sensitive fields (e.g., '*', 'x', '#'). Use 0 to disable masking.
-//
-// Fields tagged with `masked:"true"` will have their values masked in log output.
+// New creates a new Logger instance with the given options.
+// Returns an error if logger initialization fails.
 //
 // Example:
 //
-//	goslogx.SetupLog("my-service", '*')  // Enable masking with '*'
-//	goslogx.SetupLog("my-service", 0)    // Disable masking
-func SetupLog(svcName string, maskChar rune) {
+//	logger, err := goslogx.New(
+//	    goslogx.WithServiceName("my-service"),
+//	    goslogx.WithLevel(zapcore.DebugLevel),
+//	    goslogx.WithMasking(),
+//
+// New sets the global logger configuration exactly once.
+// Subsequent calls to New will return the existing global logger.
+// Returns the global Logger instance.
+func New(opts ...Option) *Logger {
 	once.Do(func() {
-		log = NewLog(svcName, maskChar)
+		globalLog.Store(setupLog(opts...))
 	})
+	return globalLog.Load()
 }
 
-// NewLog creates a new Log instance for standalone use or testing.
-// It configures JSON encoding, RFC3339 timestamps, and custom stack trace formatting.
-func NewLog(svcName string, maskChar rune) Log {
+func setupLog(opts ...Option) *Logger {
+	// Apply options to default config
+	cfg := defaultConfig()
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
 	// Configure JSON encoder with production defaults
 	encoderConfig := zap.NewProductionEncoderConfig()
 	encoderConfig.TimeKey = "time"
@@ -205,306 +235,160 @@ func NewLog(svcName string, maskChar rune) Log {
 
 	// Use custom writer for zero-allocation stack trace formatting
 	writer := &stackTraceFormattingWriter{
-		Writer: os.Stdout,
+		Writer: cfg.Output,
 		buf:    bytes.NewBuffer(make([]byte, 0, 1024)),
 	}
 
 	core := zapcore.NewCore(
 		zapcore.NewJSONEncoder(encoderConfig),
-		zapcore.Lock(writer),
-		zapcore.DebugLevel,
+		zapcore.AddSync(writer),
+		cfg.Level,
 	)
 
-	logger := zap.New(core,
+	logger := zap.New(
+		core,
 		zap.AddStacktrace(zapcore.FatalLevel),
-	).With(zap.String("application_name", svcName))
+	).With(zap.String("application_name", cfg.ServiceName))
 
-	// Initialize masking if maskChar is provided
-	maskingEnabled := maskChar != 0
-
-	return Log{
-		logger:         logger,
-		maskChar:       maskChar,
-		maskingEnabled: maskingEnabled,
+	return &Logger{
+		logger: logger,
+		config: cfg,
 	}
 }
 
-// maskString obfuscates a string based on its content and length.
-// It handles emails, long strings, and fully masks shorter secrets.
-func (l *Log) maskString(value string) string {
-	if !l.maskingEnabled || value == "" {
-		return value
-	}
+// Severity level constants for Cloud Logging compatibility.
+// Using constants avoids string allocations on every log call.
+const (
+	severityDebug    = "DEBUG"
+	severityInfo     = "INFO"
+	severityWarning  = "WARNING"
+	severityError    = "ERROR"
+	severityCritical = "CRITICAL"
+)
 
-	// Check if it's an email
-	if strings.Contains(value, "@") {
-		return l.maskEmail(value)
-	}
-
-	// For other strings, apply length-based masking
-	length := len(value)
-
-	if length <= 8 {
-		// Fully mask short strings (passwords, short secrets)
-		return strings.Repeat(string(l.maskChar), length)
-	}
-
-	// Show first 2 and last 2 characters for longer strings
-	maskLen := length - 4
-	if maskLen < 4 {
-		maskLen = 4
-	}
-	return value[:2] + strings.Repeat(string(l.maskChar), maskLen) + value[length-2:]
+// fieldPool reuses zap.Field slices to reduce allocations.
+// Capacity of 6 is the maximum number of fields used in any logging function:
+// trace_id, module, msg_type, severity, data, error = 6 fields max
+var fieldPool = sync.Pool{
+	New: func() any { return make([]zap.Field, 0, 6) },
 }
 
-// maskEmail obfuscates an email local part while preserving the domain.
-func (l *Log) maskEmail(email string) string {
-	parts := strings.Split(email, "@")
-	if len(parts) != 2 {
-		// Not a valid email, mask fully
-		return strings.Repeat(string(l.maskChar), len(email))
-	}
-
-	localPart := parts[0]
-	domain := parts[1]
-
-	if len(localPart) <= 2 {
-		// Very short local part, mask it fully
-		return strings.Repeat(string(l.maskChar), len(localPart)) + "@" + domain
-	}
-
-	// Show first 2 characters of local part
-	maskedLocal := localPart[:2] + strings.Repeat(string(l.maskChar), len(localPart)-2)
-	return maskedLocal + "@" + domain
+// getFields retrieves a field slice from the pool.
+// Always returns an empty slice ready for use.
+func getFields() []zap.Field {
+	return fieldPool.Get().([]zap.Field)[:0]
 }
 
-// processDataMasking traverses a data structure and masks fields tagged with `masked:"true"`.
-func (l *Log) processDataMasking(data any) any {
-	if !l.maskingEnabled || data == nil {
-		return data
-	}
-
-	return l.processValue(reflect.ValueOf(data))
-}
-
-// processValue recursively processes a reflect.Value and masks tagged fields.
-func (l *Log) processValue(v reflect.Value) any {
-	// Handle invalid or nil values
-	if !v.IsValid() {
-		return nil
-	}
-
-	// Dereference pointers
-	for v.Kind() == reflect.Ptr || v.Kind() == reflect.Interface {
-		if v.IsNil() {
-			return nil
-		}
-		v = v.Elem()
-	}
-
-	switch v.Kind() {
-	case reflect.Struct:
-		return l.processStruct(v)
-	case reflect.Map:
-		return l.processMap(v)
-	case reflect.Slice, reflect.Array:
-		return l.processSlice(v)
-	default:
-		return v.Interface()
-	}
-}
-
-// processStruct processes a struct and masks fields with `masked:"true"` tag.
-// Returns a map representation of the struct with masked fields.
-func (l *Log) processStruct(v reflect.Value) any {
-	t := v.Type()
-	result := make(map[string]any)
-
-	for i := 0; i < v.NumField(); i++ {
-		field := t.Field(i)
-		fieldValue := v.Field(i)
-
-		// Skip unexported fields
-		if !field.IsExported() {
-			continue
-		}
-
-		// Get JSON tag name, default to field name
-		jsonTag := field.Tag.Get("json")
-		fieldName := field.Name
-		if jsonTag != "" && jsonTag != "-" {
-			// Parse JSON tag (handle "name,omitempty" format)
-			if idx := strings.Index(jsonTag, ","); idx > 0 {
-				fieldName = jsonTag[:idx]
-			} else {
-				fieldName = jsonTag
-			}
-		}
-
-		// Check if field should be masked
-		maskedTag := field.Tag.Get("masked")
-		if maskedTag == "true" && fieldValue.Kind() == reflect.String {
-			// Mask string field
-			plaintext := fieldValue.String()
-			result[fieldName] = l.maskString(plaintext)
-		} else {
-			// Recursively process nested structures
-			result[fieldName] = l.processValue(fieldValue)
-		}
-	}
-
-	return result
-}
-
-// processMap processes a map and recursively masks nested structures.
-func (l *Log) processMap(v reflect.Value) any {
-	if v.IsNil() {
-		return nil
-	}
-
-	result := make(map[string]any)
-	iter := v.MapRange()
-	for iter.Next() {
-		key := iter.Key()
-		value := iter.Value()
-
-		// Convert key to string
-		keyStr := fmt.Sprintf("%v", key.Interface())
-		result[keyStr] = l.processValue(value)
-	}
-
-	return result
-}
-
-// processSlice processes a slice/array and recursively masks nested structures.
-func (l *Log) processSlice(v reflect.Value) any {
-	if v.Kind() == reflect.Slice && v.IsNil() {
-		return nil
-	}
-
-	result := make([]any, v.Len())
-	for i := 0; i < v.Len(); i++ {
-		result[i] = l.processValue(v.Index(i))
-	}
-
-	return result
-}
-
-// mapSeverity maps zapcore levels to Cloud Logging-compatible severity strings.
-func mapSeverity(level zapcore.Level) string {
-	severityMap := map[zapcore.Level]string{
-		zapcore.DebugLevel: "DEBUG",
-		zapcore.InfoLevel:  "INFO",
-		zapcore.WarnLevel:  "WARNING",
-		zapcore.ErrorLevel: "ERROR",
-		zapcore.FatalLevel: "CRITICAL",
-	}
-	if val, ok := severityMap[level]; ok {
-		return val
-	}
-	return "DEFAULT"
+// putFields returns a field slice to the pool for reuse.
+// Resets the slice to zero length before returning.
+func putFields(f []zap.Field) {
+	fieldPool.Put(f[:0])
 }
 
 // Fatal logs a critical error and terminates the process.
-//
-// Example:
-//
-//	goslogx.Fatal("trace-001", "connection", err)
-func Fatal(traceId string, module string, err error) {
-	logger := log.logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(1))
-	sLevel := zapcore.FatalLevel
-	fields := []zap.Field{
-		zap.String("trace_id", traceId),
+func (l *Logger) Fatal(traceID string, module string, err error) {
+	fields := getFields()
+	defer putFields(fields)
+
+	logger := l.logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(1))
+	fields = append(fields,
+		zap.String("trace_id", traceID),
 		zap.String("module", module),
 		zap.Error(err),
-		zap.String("severity", mapSeverity(sLevel)),
-	}
-	logger.Log(sLevel, "fatal error occurred", fields...)
+		zap.String("severity", severityCritical),
+	)
+
+	logger.Log(zapcore.FatalLevel, "fatal error occurred", fields...)
+}
+
+// Fatal logs a critical error using the global logger and terminates the process.
+func Fatal(traceID string, module string, err error) {
+	globalLog.Load().Fatal(traceID, module, err)
 }
 
 // Error logs an error event with automatic stack trace capture.
-//
-// Example:
-//
-//	goslogx.Error("trace-001", "database", err)
-func Error(traceId string, module string, err error) {
-	logger := log.logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(1))
-	sLevel := zapcore.ErrorLevel
-	fields := []zap.Field{
-		zap.String("trace_id", traceId),
+func (l *Logger) Error(traceID string, module string, err error) {
+	fields := getFields()
+	defer putFields(fields)
+
+	logger := l.logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(1))
+	fields = append(fields,
+		zap.String("trace_id", traceID),
 		zap.String("module", module),
 		zap.Error(err),
-		zap.String("severity", mapSeverity(sLevel)),
-	}
-	logger.Log(sLevel, "error occurred", fields...)
+		zap.String("severity", severityError),
+	)
+	logger.Log(zapcore.ErrorLevel, "error occurred", fields...)
+}
+
+// Error logs an error event using the global logger with automatic stack trace capture.
+func Error(traceID string, module string, err error) {
+	globalLog.Load().Error(traceID, module, err)
 }
 
 // Warning logs a warning-level message with optional context data.
-//
-// Example:
-//
-//	goslogx.Warning("trace-001", "cache", "cache miss rate high",
-//		map[string]interface{}{"miss_rate": 0.45})
-func Warning(traceId string, module string, msg string, data any) {
-	logger := log.logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(1))
-	sLevel := zapcore.WarnLevel
-	fields := []zap.Field{
-		zap.String("trace_id", traceId),
+func (l *Logger) Warning(traceID string, module string, msg string, data any) {
+	fields := getFields()
+	defer putFields(fields)
+
+	logger := l.logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(1))
+	fields = append(fields,
+		zap.String("trace_id", traceID),
 		zap.String("module", module),
-		zap.String("severity", mapSeverity(sLevel)),
-	}
+		zap.String("severity", severityWarning),
+	)
 	if data != nil {
-		processedData := log.processDataMasking(data)
-		fields = append(fields, zap.Any("data", processedData))
+		fields = append(fields, zap.Any("data", data))
 	}
-	logger.Log(sLevel, msg, fields...)
+	logger.Log(zapcore.WarnLevel, msg, fields...)
+}
+
+// Warning logs a warning-level message using the global logger with optional context data.
+func Warning(traceID string, module string, msg string, data any) {
+	globalLog.Load().Warning(traceID, module, msg, data)
 }
 
 // Info logs an informational message with a specified message type.
-//
-// Example:
-//
-//	goslogx.Info("trace-001", "api", goslogx.MESSSAGE_TYPE_IN,
-//		"request received", goslogx.HTTPRequestData{
-//			Method: "GET",
-//			URL: "/api/v1/users",
-//			StatusCode: 200,
-//		})
-func Info(traceId string, module string, msgType MsgType, msg string, data any) {
-	sLevel := zapcore.InfoLevel
-	fields := []zap.Field{
-		zap.String("trace_id", traceId),
+func (l *Logger) Info(traceID string, module string, msgType MsgType, msg string, data any) {
+	fields := getFields()
+	defer putFields(fields)
+
+	fields = append(fields,
+		zap.String("trace_id", traceID),
 		zap.String("module", module),
 		zap.String("msg_type", string(msgType)),
-		zap.String("severity", mapSeverity(sLevel)),
-	}
+		zap.String("severity", severityInfo),
+	)
 	if data != nil {
-		processedData := log.processDataMasking(data)
-		fields = append(fields, zap.Any("data", processedData))
+		fields = append(fields, dataField("data", data))
 	}
-	log.logger.Log(sLevel, msg, fields...)
+	l.logger.Log(zapcore.InfoLevel, msg, fields...)
+}
+
+// Info logs an informational message using the global logger with a specified message type.
+func Info(traceID string, module string, msgType MsgType, msg string, data any) {
+	globalLog.Load().Info(traceID, module, msgType, msg, data)
 }
 
 // Debug logs a debug-level message with a specified message type.
-//
-// Example:
-//
-//	goslogx.Debug("trace-001", "parser", goslogx.MESSSAGE_TYPE_IN,
-//		"processing input", map[string]interface{}{"input_len": 1024})
-func Debug(traceId string, module string, msgType MsgType, msg string, data any) {
-	// Add caller info dynamically (base logger doesn't have it)
-	logger := log.logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(1))
-	sLevel := zapcore.DebugLevel
-	fields := []zap.Field{
-		zap.String("trace_id", traceId),
+func (l *Logger) Debug(traceID string, module string, msgType MsgType, msg string, data any) {
+	fields := getFields()
+	defer putFields(fields)
+
+	logger := l.logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(1))
+	fields = append(fields,
+		zap.String("trace_id", traceID),
 		zap.String("module", module),
 		zap.String("msg_type", string(msgType)),
-		zap.String("severity", mapSeverity(sLevel)),
-	}
+		zap.String("severity", severityDebug),
+	)
 	if data != nil {
-		// Process masking for tagged fields
-		processedData := log.processDataMasking(data)
-		fields = append(fields, zap.Any("data", processedData))
+		fields = append(fields, zap.Any("data", data))
 	}
-	logger.Log(sLevel, msg, fields...)
+	logger.Log(zapcore.DebugLevel, msg, fields...)
+}
+
+// Debug logs a debug-level message using the global logger with a specified message type.
+func Debug(traceID string, module string, msgType MsgType, msg string, data any) {
+	globalLog.Load().Debug(traceID, module, msgType, msg, data)
 }

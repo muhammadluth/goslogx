@@ -3,37 +3,12 @@ package goslogx
 import (
 	"bytes"
 	"errors"
-	"strings"
+	"reflect"
 	"testing"
+	"time"
 
 	"go.uber.org/zap/zapcore"
 )
-
-// TestMapSeverityAllLevels tests all severity levels including edge cases
-func TestMapSeverityAllLevels(t *testing.T) {
-	tests := []struct {
-		name     string
-		level    zapcore.Level
-		expected string
-	}{
-		{"DebugLevel", zapcore.DebugLevel, "DEBUG"},
-		{"InfoLevel", zapcore.InfoLevel, "INFO"},
-		{"WarnLevel", zapcore.WarnLevel, "WARNING"},
-		{"ErrorLevel", zapcore.ErrorLevel, "ERROR"},
-		{"FatalLevel", zapcore.FatalLevel, "CRITICAL"},
-		{"DPanicLevel", zapcore.DPanicLevel, "DEFAULT"},
-		{"PanicLevel", zapcore.PanicLevel, "DEFAULT"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := mapSeverity(tt.level)
-			if result != tt.expected {
-				t.Errorf("mapSeverity(%v) = %s, want %s", tt.level, result, tt.expected)
-			}
-		})
-	}
-}
 
 // TestDecodeJSONString tests JSON string decoding with and without escapes
 func TestDecodeJSONString(t *testing.T) {
@@ -326,711 +301,291 @@ func (m *mockWriteSyncer) Sync() error {
 	return m.syncErr
 }
 
-// TestMaskingFunctions tests the masking helper functions
-func TestMaskingFunctions(t *testing.T) {
-	maskChar := '*' // 32 bytes for AES-256
+// TestLoggerInstanceMethods tests direct methods on Logger instance
+func TestLoggerInstanceMethods(t *testing.T) {
+	buf := &bytes.Buffer{}
+	logger := setupLog(WithOutput(buf), WithServiceName("test-logger"))
+	traceID := "trace-123"
 
-	t.Run("MaskString", func(t *testing.T) {
-		logger := NewLog("mask-test", maskChar)
-
-		// Test masking
-		plaintext := "secret-data"
-		masked := logger.maskString(plaintext)
-
-		if masked == plaintext {
-			t.Error("Masked value should differ from plaintext")
-		}
-
-		t.Logf("Masked: %s", masked)
-	})
-
-	t.Run("MaskStringNoKey", func(t *testing.T) {
-		logger := NewLog("no-mask-test", 0)
-
-		// Test masking disabled
-		plaintext := "secret-data"
-		result := logger.maskString(plaintext)
-
-		if result != plaintext {
-			t.Error("Expected plaintext when masking disabled")
+	t.Run("Info", func(t *testing.T) {
+		buf.Reset()
+		logger.Info(traceID, "mod", MESSSAGE_TYPE_EVENT, "info msg", map[string]string{"foo": "bar"})
+		if buf.Len() == 0 {
+			t.Error("Info did not write to buffer")
 		}
 	})
 
-	t.Run("ProcessDataMaskingNil", func(t *testing.T) {
-		logger := NewLog("nil-test", maskChar)
-
-		// Test with nil data
-		result := logger.processDataMasking(nil)
-		if result != nil {
-			t.Error("Expected nil result for nil data")
+	t.Run("Debug", func(t *testing.T) {
+		buf.Reset()
+		// Debug might be disabled by default, so use WithLevel or check output
+		logger.Debug(traceID, "mod", MESSSAGE_TYPE_EVENT, "debug msg", nil)
+		// Default level is Info, so Debug should be empty
+		if buf.Len() != 0 {
+			t.Logf("Debug output (unexpected if Info level): %s", buf.String())
 		}
 	})
 
-	t.Run("ProcessDataMaskingNoKey", func(t *testing.T) {
-		logger := NewLog("no-key-test", 0)
-
-		data := map[string]string{"key": "value"}
-		result := logger.processDataMasking(data)
-		if result == nil {
-			t.Error("Expected non-nil result")
+	t.Run("Warning", func(t *testing.T) {
+		buf.Reset()
+		logger.Warning(traceID, "mod", "warn msg", nil)
+		if buf.Len() == 0 {
+			t.Error("Warning did not write to buffer")
 		}
 	})
 
-	t.Run("ProcessStructWithMaskedFields", func(t *testing.T) {
-		logger := NewLog("struct-test", maskChar)
-
-		type TestStruct struct {
-			Public string `json:"public"`
-			Secret string `json:"secret" masked:"true"`
-			Number int    `json:"number"`
+	t.Run("Error", func(t *testing.T) {
+		buf.Reset()
+		logger.Error(traceID, "mod", errors.New("test error"))
+		if buf.Len() == 0 {
+			t.Error("Error did not write to buffer")
 		}
-
-		data := TestStruct{
-			Public: "public-value",
-			Secret: "secret-value",
-			Number: 42,
+		if !bytes.Contains(buf.Bytes(), []byte("test error")) {
+			t.Error("Error message not found in output")
 		}
+	})
+}
 
-		result := logger.processDataMasking(data)
-		resultMap, ok := result.(map[string]any)
-		if !ok {
-			t.Fatal("Expected map result")
-		}
-
-		// Check public field is unchanged
-		if resultMap["public"] != "public-value" {
-			t.Error("Public field should be unchanged")
-		}
-
-		// Check secret field is masked
-		secretVal, ok := resultMap["secret"].(string)
-		if !ok {
-			t.Fatal("Expected string secret field")
-		}
-
-		if secretVal == "secret-value" {
-			t.Error("Secret field should be masked")
+// TestDataField tests the dataField helper and its various branches
+func TestDataField(t *testing.T) {
+	t.Run("Nil", func(t *testing.T) {
+		field := dataField("key", nil)
+		if field.Type != zapcore.SkipType {
+			t.Errorf("Expected SkipType for nil, got %v", field.Type)
 		}
 	})
 
-	t.Run("ProcessNestedStructs", func(t *testing.T) {
-		logger := NewLog("nested-test", maskChar)
+	t.Run("FastPathDTOs", func(t *testing.T) {
+		// HTTPData now always uses maskedObject wrapper
+		httpData := HTTPData{Method: "GET", URL: "/api"}
+		field := dataField("key", httpData)
+		if field.Type != zapcore.ObjectMarshalerType {
+			t.Errorf("Expected ObjectMarshalerType for HTTPData, got %v", field.Type)
+		}
 
+		// Pointer to HTTPData
+		field = dataField("key", &httpData)
+		if field.Type != zapcore.ObjectMarshalerType {
+			t.Errorf("Expected ObjectMarshalerType for *HTTPData, got %v", field.Type)
+		}
+
+		// DBData should always use ObjectMarshaler
+		dbData := DBData{Driver: "postgres"}
+		field = dataField("key", dbData)
+		if field.Type != zapcore.ObjectMarshalerType {
+			t.Errorf("Expected ObjectMarshalerType for DBData, got %v", field.Type)
+		}
+
+		field = dataField("key", &dbData)
+		if field.Type != zapcore.ObjectMarshalerType {
+			t.Errorf("Expected ObjectMarshalerType for *DBData, got %v", field.Type)
+		}
+	})
+
+	t.Run("SliceOfStructs", func(t *testing.T) {
+		type S struct{ Name string }
+		slice := []S{{Name: "test"}}
+		field := dataField("key", slice)
+		if field.Type != zapcore.ArrayMarshalerType {
+			t.Errorf("Expected ArrayMarshalerType for slice of structs, got %v", field.Type)
+		}
+	})
+
+	t.Run("SliceOfPointersToStructs", func(t *testing.T) {
+		type S struct{ Name string }
+		slice := []*S{{Name: "test"}}
+		field := dataField("key", slice)
+		if field.Type != zapcore.ArrayMarshalerType {
+			t.Errorf("Expected ArrayMarshalerType for slice of struct pointers, got %v", field.Type)
+		}
+	})
+
+	t.Run("SliceOfPrimitives", func(t *testing.T) {
+		slice := []int{1, 2, 3}
+		field := dataField("key", slice)
+		// zap.Any for a slice might be ArrayMarshalerType (1) or ReflectType
+		if field.Type == zapcore.SkipType {
+			t.Errorf("Expected non-skip type for primitive slice, got %v", field.Type)
+		}
+	})
+
+	t.Run("Map", func(t *testing.T) {
+		m := map[string]string{"foo": "bar"}
+		field := dataField("key", m)
+		if field.Type == zapcore.SkipType {
+			t.Errorf("Expected non-skip type for map, got %v", field.Type)
+		}
+	})
+
+	t.Run("Struct", func(t *testing.T) {
+		type S struct{ Name string }
+		field := dataField("key", S{Name: "test"})
+		if field.Type != zapcore.ObjectMarshalerType {
+			t.Errorf("Expected ObjectMarshalerType for struct, got %v", field.Type)
+		}
+	})
+
+	t.Run("PointerToNil", func(t *testing.T) {
+		var s *string
+		field := dataField("key", s)
+		if field.Type != zapcore.SkipType {
+			t.Errorf("Expected SkipType for nil pointer, got %v", field.Type)
+		}
+	})
+}
+
+// TestMaskingExecution manually triggers marshaling to cover all branches in masking.go
+func TestMaskingExecution(t *testing.T) {
+	enc := zapcore.NewMapObjectEncoder()
+
+	t.Run("MarshalLogObject", func(t *testing.T) {
 		type Inner struct {
-			Password string `json:"password" masked:"true"`
+			Secret string `log:"masked:full"`
 		}
-
 		type Outer struct {
-			Name  string `json:"name"`
-			Inner Inner  `json:"inner"`
-		}
-
-		data := Outer{
-			Name: "test",
-			Inner: Inner{
-				Password: "secret123",
-			},
-		}
-
-		result := logger.processDataMasking(data)
-		resultMap, ok := result.(map[string]any)
-		if !ok {
-			t.Fatal("Expected map result")
-		}
-
-		innerMap, ok := resultMap["inner"].(map[string]any)
-		if !ok {
-			t.Fatal("Expected inner map")
-		}
-
-		password, ok := innerMap["password"].(string)
-		if !ok {
-			t.Fatal("Expected password string")
-		}
-
-		if password == "secret123" {
-			t.Error("Password should be masked")
-		}
-	})
-
-	t.Run("ProcessMap", func(t *testing.T) {
-		logger := NewLog("map-test", maskChar)
-
-		type TestStruct struct {
-			Secret string `json:"secret" masked:"true"`
-		}
-
-		data := map[string]interface{}{
-			"item": TestStruct{Secret: "password"},
-		}
-
-		result := logger.processDataMasking(data)
-		resultMap, ok := result.(map[string]any)
-		if !ok {
-			t.Fatal("Expected map result")
-		}
-
-		itemMap, ok := resultMap["item"].(map[string]any)
-		if !ok {
-			t.Fatal("Expected item map")
-		}
-
-		secret, ok := itemMap["secret"].(string)
-		if !ok {
-			t.Fatal("Expected secret string")
-		}
-
-		if secret == "password" {
-			t.Error("Secret should be masked")
-		}
-	})
-
-	t.Run("ProcessSlice", func(t *testing.T) {
-		logger := NewLog("slice-test", maskChar)
-
-		type TestStruct struct {
-			Secret string `json:"secret" masked:"true"`
-		}
-
-		data := []TestStruct{
-			{Secret: "secret1"},
-			{Secret: "secret2"},
-		}
-
-		result := logger.processDataMasking(data)
-		resultSlice, ok := result.([]any)
-		if !ok {
-			t.Fatal("Expected slice result")
-		}
-
-		if len(resultSlice) != 2 {
-			t.Errorf("Expected 2 items, got %d", len(resultSlice))
-		}
-
-		// Check first item
-		item1, ok := resultSlice[0].(map[string]any)
-		if !ok {
-			t.Fatal("Expected map in slice")
-		}
-
-		secret1, ok := item1["secret"].(string)
-		if !ok {
-			t.Fatal("Expected secret string")
-		}
-
-		if secret1 == "secret1" {
-			t.Error("Secret should be masked")
-		}
-	})
-
-	t.Run("ProcessNilMap", func(t *testing.T) {
-		logger := NewLog("nil-map-test", maskChar)
-
-		var data map[string]string
-		result := logger.processDataMasking(data)
-		if result != nil {
-			t.Error("Expected nil for nil map")
-		}
-	})
-
-	t.Run("ProcessNilSlice", func(t *testing.T) {
-		logger := NewLog("nil-slice-test", maskChar)
-
-		var data []string
-		result := logger.processDataMasking(data)
-		if result != nil {
-			t.Error("Expected nil for nil slice")
-		}
-	})
-
-	t.Run("ProcessEmptyString", func(t *testing.T) {
-		logger := NewLog("empty-test", maskChar)
-
-		type TestStruct struct {
-			Secret string `json:"secret" masked:"true"`
-		}
-
-		data := TestStruct{Secret: ""}
-		result := logger.processDataMasking(data)
-		resultMap, ok := result.(map[string]any)
-		if !ok {
-			t.Fatal("Expected map result")
-		}
-
-		secret, ok := resultMap["secret"].(string)
-		if !ok {
-			t.Fatal("Expected secret string")
-		}
-
-		if secret != "" {
-			t.Error("Empty string should remain empty")
-		}
-	})
-
-	t.Run("ProcessPrimitiveTypes", func(t *testing.T) {
-		logger := NewLog("primitive-test", maskChar)
-
-		// Test with primitive types
-		result := logger.processDataMasking(42)
-		if result != 42 {
-			t.Error("Primitive int should be unchanged")
-		}
-
-		result = logger.processDataMasking("string")
-		if result != "string" {
-			t.Error("Primitive string should be unchanged")
-		}
-
-		result = logger.processDataMasking(true)
-		if result != true {
-			t.Error("Primitive bool should be unchanged")
-		}
-	})
-
-}
-
-// TestMaskingEdgeCases tests edge cases in masking
-func TestMaskingEdgeCases(t *testing.T) {
-	maskChar := '*'
-
-	t.Run("ProcessPointerToStruct", func(t *testing.T) {
-		logger := NewLog("pointer-test", maskChar)
-
-		type TestStruct struct {
-			Secret string `json:"secret" masked:"true"`
-		}
-
-		data := &TestStruct{Secret: "password"}
-		result := logger.processDataMasking(data)
-		resultMap, ok := result.(map[string]any)
-		if !ok {
-			t.Fatal("Expected map result")
-		}
-
-		secret, ok := resultMap["secret"].(string)
-		if !ok {
-			t.Fatal("Expected secret string")
-		}
-
-		if secret == "password" {
-			t.Error("Secret should be masked")
-		}
-	})
-
-	t.Run("ProcessInterface", func(t *testing.T) {
-		logger := NewLog("interface-test", maskChar)
-
-		type TestStruct struct {
-			Secret string `json:"secret" masked:"true"`
-		}
-
-		var data interface{} = TestStruct{Secret: "password"}
-		result := logger.processDataMasking(data)
-		resultMap, ok := result.(map[string]any)
-		if !ok {
-			t.Fatal("Expected map result")
-		}
-
-		secret, ok := resultMap["secret"].(string)
-		if !ok {
-			t.Fatal("Expected secret string")
-		}
-
-		if secret == "password" {
-			t.Error("Secret should be masked")
-		}
-	})
-
-	t.Run("ProcessArray", func(t *testing.T) {
-		logger := NewLog("array-test", maskChar)
-
-		type TestStruct struct {
-			Secret string `json:"secret" masked:"true"`
-		}
-
-		data := [2]TestStruct{
-			{Secret: "secret1"},
-			{Secret: "secret2"},
-		}
-
-		result := logger.processDataMasking(data)
-		resultSlice, ok := result.([]any)
-		if !ok {
-			t.Fatal("Expected slice result")
-		}
-
-		if len(resultSlice) != 2 {
-			t.Errorf("Expected 2 items, got %d", len(resultSlice))
-		}
-	})
-
-	t.Run("ProcessStructWithOmitempty", func(t *testing.T) {
-		logger := NewLog("omitempty-test", maskChar)
-
-		type TestStruct struct {
-			Secret string `json:"secret,omitempty" masked:"true"`
-			Public string `json:"public,omitempty"`
-		}
-
-		data := TestStruct{
-			Secret: "password",
-			Public: "value",
-		}
-
-		result := logger.processDataMasking(data)
-		resultMap, ok := result.(map[string]any)
-		if !ok {
-			t.Fatal("Expected map result")
-		}
-
-		secret, ok := resultMap["secret"].(string)
-		if !ok {
-			t.Fatal("Expected secret string")
-		}
-
-		if secret == "password" {
-			t.Error("Secret should be masked")
-		}
-
-		if resultMap["public"] != "value" {
-			t.Error("Public field should be unchanged")
-		}
-	})
-
-	t.Run("ProcessStructWithJSONDash", func(t *testing.T) {
-		logger := NewLog("dash-test", maskChar)
-
-		type TestStruct struct {
+			Public  string
+			Partial string `log:"masked:partial"`
+			Nested  Inner
+			Ptr     *Inner
+			Time    time.Time
+			Slice   []Inner
 			Ignored string `json:"-"`
-			Public  string `json:"public"`
 		}
 
-		data := TestStruct{
-			Ignored: "ignored",
-			Public:  "value",
+		now := time.Now()
+		obj := maskedObject{v: Outer{
+			Public:  "hello",
+			Partial: "sensitive",
+			Nested:  Inner{Secret: "topsecret"},
+			Ptr:     &Inner{Secret: "ptrsecret"},
+			Time:    now,
+			Slice:   []Inner{{Secret: "slice-secret"}},
+			Ignored: "don't show",
+		}}
+
+		err := obj.MarshalLogObject(enc)
+		if err != nil {
+			t.Fatalf("MarshalLogObject failed: %v", err)
 		}
 
-		result := logger.processDataMasking(data)
-		resultMap, ok := result.(map[string]any)
-		if !ok {
-			t.Fatal("Expected map result")
+		m := enc.Fields
+		// Field names are PascalCase if no JSON tag
+		if m["Public"] != "hello" {
+			t.Errorf("Expected Public=hello, got %v", m["Public"])
 		}
-
-		// Ignored field should not be in result
-		if _, exists := resultMap["-"]; exists {
-			t.Error("Ignored field should not be in result")
-		}
-
-		if resultMap["public"] != "value" {
-			t.Error("Public field should be unchanged")
-		}
-	})
-
-	t.Run("ProcessNilPointer", func(t *testing.T) {
-		logger := NewLog("nil-ptr-test", maskChar)
-
-		type TestStruct struct {
-			Secret string `json:"secret" masked:"true"`
-		}
-
-		var data *TestStruct
-		result := logger.processDataMasking(data)
-		if result != nil {
-			t.Error("Expected nil for nil pointer")
+		if m["Partial"] != "se****ve" {
+			t.Errorf("Expected Partial mask, got %v", m["Partial"])
 		}
 	})
 
-	t.Run("ProcessNilInterface", func(t *testing.T) {
-		logger := NewLog("nil-iface-test", maskChar)
-
-		var data interface{}
-		result := logger.processDataMasking(data)
-		if result != nil {
-			t.Error("Expected nil for nil interface")
-		}
-	})
-}
-
-// TestMaskingBufferReallocation tests buffer reallocation in masking
-func TestMaskingBufferReallocation(t *testing.T) {
-	maskChar := '*'
-
-	t.Run("MaskLargeString", func(t *testing.T) {
-		logger := NewLog("large-test", maskChar)
-
-		// Create a large string that will require buffer reallocation
-		largeString := strings.Repeat("a", 1000)
-		masked := logger.maskString(largeString)
-
-		if masked == largeString {
-			t.Error("Masked value should differ from plaintext")
-		}
-	})
-
-	t.Run("ProcessStructWithNonStringMaskedField", func(t *testing.T) {
-		logger := NewLog("non-string-test", maskChar)
-
-		type TestStruct struct {
-			Number int    `json:"number" masked:"true"` // masked tag on non-string field
-			Secret string `json:"secret" masked:"true"`
+	t.Run("MarshalLogObjectExtra", func(t *testing.T) {
+		type AllTypes struct {
+			I     int
+			U     uint
+			F     float64
+			B     bool
+			A     [2]int
+			M     map[string]int
+			P     *int
+			Alias string `json:"name_alias"` // JSON tag without comma
 		}
 
-		data := TestStruct{
-			Number: 42,
-			Secret: "password",
-		}
-
-		result := logger.processDataMasking(data)
-		resultMap, ok := result.(map[string]any)
-		if !ok {
-			t.Fatal("Expected map result")
-		}
-
-		// Number should be unchanged (not a string)
-		if resultMap["number"] != 42 {
-			t.Error("Number field should be unchanged")
-		}
-
-		// Secret should be masked
-		secret, ok := resultMap["secret"].(string)
-		if !ok {
-			t.Fatal("Expected secret string")
-		}
-
-		if secret == "password" {
-			t.Error("Secret should be masked")
+		val := 10
+		obj := maskedObject{v: AllTypes{
+			I: -1, U: 1, F: 1.1, B: true,
+			A:     [2]int{1, 2},
+			M:     map[string]int{"a": 1},
+			P:     &val,
+			Alias: "alias",
+		}}
+		err := obj.MarshalLogObject(zapcore.NewMapObjectEncoder())
+		if err != nil {
+			t.Errorf("MarshalLogObjectExtra failed: %v", err)
 		}
 	})
 
-	t.Run("ProcessMapWithIntKey", func(t *testing.T) {
-		logger := NewLog("int-key-test", maskChar)
-
-		type TestStruct struct {
-			Secret string `json:"secret" masked:"true"`
+	t.Run("MarshalLogArrayExtra", func(t *testing.T) {
+		// Nil pointers in array
+		var s *string
+		slice := []*string{nil, s}
+		arr := maskedArray{v: reflect.ValueOf(slice)}
+		enc := &mockArrayEncoder{}
+		err := arr.MarshalLogArray(enc)
+		if err != nil {
+			t.Errorf("MarshalLogArrayExtra failed: %v", err)
 		}
 
-		data := map[int]TestStruct{
-			1: {Secret: "password"},
+		// Primitives in array
+		primSlice := []int{1, 2}
+		arrPrim := maskedArray{v: reflect.ValueOf(primSlice)}
+		err = arrPrim.MarshalLogArray(enc)
+		if err != nil {
+			t.Errorf("MarshalLogArrayExtra primitives failed: %v", err)
+		}
+	})
+
+	t.Run("NonStructMasking", func(t *testing.T) {
+		obj := maskedObject{v: "not a struct"}
+		err := obj.MarshalLogObject(zapcore.NewMapObjectEncoder())
+		if err != nil {
+			t.Errorf("MarshalLogObject with non-struct failed: %v", err)
+		}
+	})
+
+	t.Run("PointerMasking", func(t *testing.T) {
+		type S struct{ Name string }
+		s := &S{Name: "test"}
+		obj := maskedObject{v: s}
+		err := obj.MarshalLogObject(zapcore.NewMapObjectEncoder())
+		if err != nil {
+			t.Errorf("MarshalLogObject with pointer failed: %v", err)
 		}
 
-		result := logger.processDataMasking(data)
-		resultMap, ok := result.(map[string]any)
-		if !ok {
-			t.Fatal("Expected map result")
-		}
-
-		// Check that the key was converted to string
-		item, ok := resultMap["1"]
-		if !ok {
-			t.Fatal("Expected key '1' in result")
-		}
-
-		itemMap, ok := item.(map[string]any)
-		if !ok {
-			t.Fatal("Expected item to be map")
-		}
-
-		secret, ok := itemMap["secret"].(string)
-		if !ok {
-			t.Fatal("Expected secret string")
-		}
-
-		if secret == "password" {
-			t.Error("Secret should be masked")
+		var nilS *S
+		objNil := maskedObject{v: nilS}
+		err = objNil.MarshalLogObject(zapcore.NewMapObjectEncoder())
+		if err != nil {
+			t.Errorf("MarshalLogObject with nil pointer failed: %v", err)
 		}
 	})
 }
 
-// TestMaskEmail tests email masking functionality
-func TestMaskEmail(t *testing.T) {
-	maskChar := '*'
+// TestMaskMiddle tests the maskMiddle helper
+func TestMaskMiddle(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"123", "****"},
+		{"1234", "****"},
+		{"12345", "12****45"},
+		{"johndoe", "jo****oe"},
+		{"", "****"},
+	}
 
-	t.Run("ValidEmail", func(t *testing.T) {
-logger := NewLog("email-test", maskChar)
-
-email := "john.doe@example.com"
-masked := logger.maskEmail(email)
-
-// Should show first 2 chars + domain
-if !strings.HasPrefix(masked, "jo") {
-t.Errorf("Expected masked email to start with 'jo', got %s", masked)
-}
-
-if !strings.HasSuffix(masked, "@example.com") {
-t.Errorf("Expected masked email to end with '@example.com', got %s", masked)
-}
-
-if !strings.Contains(masked, string(maskChar)) {
-t.Errorf("Expected masked email to contain mask character, got %s", masked)
-}
-
-t.Logf("Masked email: %s", masked)
-})
-
-	t.Run("ShortLocalPart", func(t *testing.T) {
-logger := NewLog("short-email-test", maskChar)
-
-email := "ab@example.com"
-masked := logger.maskEmail(email)
-
-// Very short local part should be fully masked
-if !strings.Contains(masked, string(maskChar)) {
-t.Errorf("Expected masked email to contain mask character, got %s", masked)
-}
-
-if !strings.HasSuffix(masked, "@example.com") {
-t.Errorf("Expected masked email to end with '@example.com', got %s", masked)
-}
-
-t.Logf("Masked short email: %s", masked)
-})
-
-	t.Run("InvalidEmail", func(t *testing.T) {
-logger := NewLog("invalid-email-test", maskChar)
-
-email := "notanemail"
-masked := logger.maskEmail(email)
-
-// Invalid email should be fully masked
-if masked != strings.Repeat(string(maskChar), len(email)) {
-t.Errorf("Expected fully masked invalid email, got %s", masked)
-}
-
-t.Logf("Masked invalid email: %s", masked)
-})
-
-	t.Run("EmailWithMultipleAt", func(t *testing.T) {
-logger := NewLog("multi-at-test", maskChar)
-
-email := "test@test@example.com"
-masked := logger.maskEmail(email)
-
-// Should be fully masked as it's invalid
-if masked != strings.Repeat(string(maskChar), len(email)) {
-			t.Errorf("Expected fully masked email with multiple @, got %s", masked)
+	for _, tt := range tests {
+		result := maskMiddle(tt.input)
+		if result != tt.expected {
+			t.Errorf("maskMiddle(%s) = %s, want %s", tt.input, result, tt.expected)
 		}
-		
-		t.Logf("Masked multi-@ email: %s", masked)
-	})
+	}
 }
 
-// TestMaskStringEdgeCases tests edge cases for string masking
-func TestMaskStringEdgeCases(t *testing.T) {
-	maskChar := '*'
+// mockObject implements zapcore.ObjectMarshaler
+type mockObject struct{}
 
-	t.Run("EmailDetection", func(t *testing.T) {
-		logger := NewLog("email-detect-test", maskChar)
-		
-		email := "user@domain.com"
-		masked := logger.maskString(email)
-		
-		// Should detect email and mask appropriately
-		if !strings.Contains(masked, "@") {
-			t.Error("Expected @ symbol to be preserved in masked email")
-		}
-		
-		t.Logf("Masked email via maskString: %s", masked)
-	})
-
-	t.Run("ShortString", func(t *testing.T) {
-		logger := NewLog("short-test", maskChar)
-		
-		short := "pass"
-		masked := logger.maskString(short)
-		
-		// Short strings should be fully masked
-		if masked != "****" {
-			t.Errorf("Expected fully masked short string, got %s", masked)
-		}
-		
-		t.Logf("Masked short string: %s", masked)
-	})
-
-	t.Run("MediumString", func(t *testing.T) {
-		logger := NewLog("medium-test", maskChar)
-		
-		medium := "password"
-		masked := logger.maskString(medium)
-		
-		// 8 chars should be fully masked
-		if masked != "********" {
-			t.Errorf("Expected fully masked 8-char string, got %s", masked)
-		}
-		
-		t.Logf("Masked medium string: %s", masked)
-	})
-
-	t.Run("LongString", func(t *testing.T) {
-		logger := NewLog("long-test", maskChar)
-		
-		long := "verylongpassword123"
-		masked := logger.maskString(long)
-		
-		// Should show first 2 and last 2
-		if !strings.HasPrefix(masked, "ve") {
-			t.Errorf("Expected masked string to start with 've', got %s", masked)
-		}
-		
-		if !strings.HasSuffix(masked, "23") {
-			t.Errorf("Expected masked string to end with '23', got %s", masked)
-		}
-		
-		if !strings.Contains(masked, string(maskChar)) {
-			t.Errorf("Expected masked string to contain mask character, got %s", masked)
-		}
-		
-		t.Logf("Masked long string: %s", masked)
-	})
-
-	t.Run("DifferentMaskChar", func(t *testing.T) {
-		logger := NewLog("x-mask-test", 'x')
-		
-		value := "secretvalue"
-		masked := logger.maskString(value)
-		
-		// Should use 'x' as mask character
-		if !strings.Contains(masked, "x") {
-			t.Errorf("Expected masked string to contain 'x', got %s", masked)
-		}
-		
-		t.Logf("Masked with 'x': %s", masked)
-	})
+func (m *mockObject) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	return nil
 }
 
-// TestProcessStructJSONTagEdgeCases tests JSON tag parsing edge cases
-func TestProcessStructJSONTagEdgeCases(t *testing.T) {
-	maskChar := '*'
-
-	t.Run("JSONTagWithoutComma", func(t *testing.T) {
-logger := NewLog("json-tag-test", maskChar)
-
-type TestStruct struct {
-Field string `json:"customname" masked:"true"`
+// mockArrayEncoder is a minimal mock for zapcore.ArrayEncoder
+type mockArrayEncoder struct {
+	zapcore.ArrayEncoder
 }
 
-data := TestStruct{Field: "secret"}
-result := logger.processDataMasking(data)
-resultMap, ok := result.(map[string]any)
-if !ok {
-t.Fatal("Expected map result")
+func (m *mockArrayEncoder) AppendObject(obj zapcore.ObjectMarshaler) error {
+	return obj.MarshalLogObject(zapcore.NewMapObjectEncoder())
 }
 
-// Should use custom JSON name
-if _, exists := resultMap["customname"]; !exists {
-			t.Error("Expected field with custom JSON name")
-		}
-	})
-
-	t.Run("MaskStringNineChars", func(t *testing.T) {
-logger := NewLog("nine-char-test", maskChar)
-
-// Test 9-char string (just over the 8-char threshold)
-value := "password1"
-masked := logger.maskString(value)
-
-// Should show first 2 and last 2
-if !strings.HasPrefix(masked, "pa") || !strings.HasSuffix(masked, "d1") {
-t.Errorf("Expected 'pa****d1', got %s", masked)
-}
-})
+func (m *mockArrayEncoder) AppendReflected(v any) error {
+	return nil
 }
