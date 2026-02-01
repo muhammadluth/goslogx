@@ -16,8 +16,8 @@ import (
 
 // DTO tests
 func TestDTOs(t *testing.T) {
-	t.Run("HTTPRequestData", func(t *testing.T) {
-		data := goslogx.HTTPRequestData{
+	t.Run("HTTPData", func(t *testing.T) {
+		data := goslogx.HTTPData{
 			Method:     "GET",
 			URL:        "/api/v1/users",
 			StatusCode: 200,
@@ -25,18 +25,18 @@ func TestDTOs(t *testing.T) {
 		}
 		b, err := json.Marshal(data)
 		if err != nil {
-			t.Fatalf("Failed to marshal HTTPRequestData: %v", err)
+			t.Fatalf("Failed to marshal HTTPData: %v", err)
 		}
-		t.Logf("HTTPRequestData JSON: %s", string(b))
+		t.Logf("HTTPData JSON: %s", string(b))
 	})
 
 	t.Run("DBData", func(t *testing.T) {
 		data := goslogx.DBData{
-			Driver:     "postgres",
-			Operation:  "SELECT",
-			Table:      "users",
-			Statement:  "SELECT * FROM users WHERE id = 1",
-			DurationMs: 50,
+			Driver:    "postgres",
+			Operation: "SELECT",
+			Table:     "users",
+			Statement: "SELECT * FROM users WHERE id = 1",
+			Duration:  "50ms",
 		}
 		b, err := json.Marshal(data)
 		if err != nil {
@@ -93,7 +93,7 @@ func TestLoggingFunctions(t *testing.T) {
 	}()
 
 	// Initialize the logger (this will pick up the pipe writer as stdout)
-	goslogx.SetupLog("test-service")
+	goslogx.SetupLog("test-service", 0) // 0 = no masking
 
 	traceID := "trace-123"
 
@@ -146,12 +146,19 @@ func TestLoggingFunctions(t *testing.T) {
 			t.Errorf("Expected application_name test-service, got %v", logEntry["application_name"])
 		}
 	}
+
+	// 5. Test with nil data to cover "if data != nil" branches
+	t.Run("NilData", func(t *testing.T) {
+		goslogx.Info(traceID, "nil-module", goslogx.MESSSAGE_TYPE_EVENT, "info nil data", nil)
+		goslogx.Warning(traceID, "nil-module", "warning nil data", nil)
+		goslogx.Debug(traceID, "nil-module", goslogx.MESSSAGE_TYPE_EVENT, "debug nil data", nil)
+	})
 }
 
 // TestFatal runs the Fatal test in a separate process to verify os.Exit(1)
 func TestFatal(t *testing.T) {
 	if os.Getenv("BE_CRASHER") == "1" {
-		goslogx.SetupLog("crash-service")
+		goslogx.SetupLog("crash-service", 0)
 		traceID := "crash-trace"
 		err := errors.New("critical failure")
 		goslogx.Fatal(traceID, "main", err)
@@ -182,9 +189,17 @@ func TestFatal(t *testing.T) {
 // TestSetupLogConcurrency ensures SetupLog is idempotent and thread-safe
 func TestSetupLogConcurrency(t *testing.T) {
 	for i := 0; i < 10; i++ {
-		go goslogx.SetupLog("concurrent-service")
+		go goslogx.SetupLog("concurrent-service", 0)
 	}
 	// Give them time to race
 	time.Sleep(10 * time.Millisecond)
 	// If we didn't panic, we're good (sync.Once covers this, but good to cover line)
+}
+
+func TestSetupLogMultipleCalls(t *testing.T) {
+	// SetupLog is already called in TestLoggingFunctions and TestSetupLogConcurrency.
+	// Calling it again with a different name should not change the global logger.
+	goslogx.SetupLog("new-service-name", 0)
+	// We can't easily verify the internal state of the global logger without exposing it,
+	// but we're ensuring it doesn't panic or cause issues.
 }

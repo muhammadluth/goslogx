@@ -1,4 +1,4 @@
-# GOSLOGX
+# goslogx
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/muhammadluth/goslogx.svg)](https://pkg.go.dev/github.com/muhammadluth/goslogx)
 [![Go Report Card](https://goreportcard.com/badge/github.com/muhammadluth/goslogx)](https://goreportcard.com/report/github.com/muhammadluth/goslogx)
@@ -6,143 +6,106 @@
 [![codecov](https://codecov.io/gh/muhammadluth/goslogx/graph/badge.svg?token=QD1YFY5MC8)](https://codecov.io/gh/muhammadluth/goslogx)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**GOSLOGX** is a high-performance, structured logging library for Go, built on top of [Uber's Zap](https://github.com/uber-go/zap). It provides a standardized logging format with specialized Data Transfer Objects (DTOs) for common application scenarios like HTTP requests, database operations, and message queue events.
+**goslogx** is a high-performance, engineer-grade structured logging library for Go. Built on top of [Uber's Zap](https://github.com/uber-go/zap), it extends standard logging with zero-allocation field masking, compact stack trace formatting, and standardized DTOs for consistent observability across distributed systems.
 
-## Features
+## 🚀 Key Features
 
--   🚀 **High Performance**: Powered by Zap's production-optimized configuration.
--   📝 **Structured JSON Logging**: Consistent JSON output for easy parsing and observability.
--   📦 **Standardized DTOs**: Pre-defined structs for `HTTP`, `DB`, `MQ`, and `Generic` events.
--   🏷️ **Rich Metadata**: Automatically includes `trace_id`, `module`, `severity`, and source code location.
--   🛠️ **Easy Migration**: Simple API compatible with common logging patterns.
+- **High-Performance Masking**: Zero-allocation field obfuscation using simple struct tags (`masked:"true"`).
+- **Intelligent Stack Traces**: Re-formats multi-line stack traces into a compact, searchable single-line format.
+- **Production-Ready DTOs**: Standardized schemas for HTTP, Database, and Message Queue interactions.
+- **Zero-Allocation Design**: Leverages `sync.Pool` and byte-level scanning to minimize GC pressure.
+- **Cloud-Native Severity**: Maps internal log levels to standard severity strings (DEBUG, INFO, WARNING, ERROR, CRITICAL).
 
-## Installation
+## 📦 Installation
 
 ```bash
 go get github.com/muhammadluth/goslogx
 ```
 
-## Usage
+## 🛠️ Quick Start
 
-### 1. Setup
-
-Initialize the logger once at the start of your application, for example in `main.go`:
+### Basic Initialization
+Initialize the global logger once in your `main()` or `init()`.
 
 ```go
 package main
 
-import (
-	"github.com/muhammadluth/goslogx"
-)
+import "github.com/muhammadluth/goslogx"
 
 func main() {
-	// Initialize with your service name
-	goslogx.SetupLog("my-service-name")
-	
-	// ... your app code
+    // Initialize with service name and mask character (e.g., '*')
+    // Use 0 to disable masking
+    goslogx.SetupLog("payment-service", '*')
+
+    goslogx.Info("trace-550e8400", "auth", goslogx.MESSSAGE_TYPE_EVENT, "user login successful", nil)
 }
 ```
 
-### 2. Basic Logging
-
-Use the standard logging functions `Info`, `Debug`, `Warning`, `Error`, and `Fatal`.
-
+### Logging with Context
 ```go
-ctx := context.Background()
 traceID := "trace-123"
 
-// Simple Info log
-goslogx.Info(ctx, traceID, "user-module", goslogx.MESSSAGE_TYPE_IN, "processing user", nil)
-
-// Warning with data
-goslogx.Warning(ctx, traceID, "payment", "payment gateway timeout", map[string]int{"attempt": 3})
-
-// Error logging (includes stack trace automatically)
-err := errors.New("database connection failed")
-goslogx.Error(ctx, traceID, "db", err)
-```
-
-### 3. Using DTOs
-
-Use the standardized DTOs to log detailed context for specific operations.
-
-#### HTTP Request
-
-```go
-reqData := goslogx.HTTPRequestData{
-    Method:     "GET",
-    URL:        "/api/users/123",
-    StatusCode: 200,
-    ClientIP:   "192.168.1.1",
+// Error with automatic stack trace
+if err := processOrder(); err != nil {
+    goslogx.Error(traceID, "order-worker", err)
 }
 
-goslogx.Info(ctx, traceID, "http-handler", goslogx.MESSSAGE_TYPE_IN, "request handled", reqData)
+// Warning with metadata
+goslogx.Warning(traceID, "cache", "high latency detected", map[string]float64{"latency_ms": 450.5})
 ```
 
-#### Database Operation
+## 🛡️ Field Masking
+
+Protect PII and sensitive data automatically. Fields tagged with `masked:"true"` are obfuscated based on their content:
+
+- **Emails**: Shows first 2 characters + domain (e.g., `jo******@example.com`).
+- **Short Secrets**: Fully masked if ≤ 8 characters.
+- **Long Text**: Shows first 2 and last 2 characters (e.g., `ve****************12`).
 
 ```go
-dbData := goslogx.DBData{
-    Driver:     "postgres",
-    Operation:  "SELECT",
-    Table:      "users",
-    Statement:  "SELECT * FROM users WHERE id = $1",
-    DurationMs: 45,
+type UserData struct {
+    Email    string `json:"email" masked:"true"`
+    Password string `json:"password" masked:"true"`
+    Address  string `json:"address"`
 }
 
-goslogx.Info(ctx, traceID, "user-repo", goslogx.MESSSAGE_TYPE_OUT, "query executed", dbData)
-```
-
-#### Message Queue
-
-```go
-mqData := goslogx.MQData{
-    Driver:    "kafka",
-    Operation: "consume",
-    Topic:     "order-events",
-    Group:     "order-service",
-    MessageID: "msg-uuid",
+data := UserData{
+    Email:    "john.doe@example.com",
+    Password: "supersecret",
+    Address:  "123 Go Lane",
 }
 
-goslogx.Info(ctx, traceID, "event-consumer", goslogx.MESSSAGE_TYPE_IN, "event received", mqData)
+// Password will be fully masked, Email partially, Address remains visible
+goslogx.Info(traceID, "user-api", goslogx.MESSSAGE_TYPE_EVENT, "profile update", data)
 ```
 
-#### Generic / Third-Party
+## 📊 Standardized DTOs
 
-```go
-extData := goslogx.GenericData{
-    Service: "Stripe",
-    Action:  "Charge",
-    Payload: map[string]interface{}{"amount": 2000, "currency": "idr"},
-}
+Consistency is key for log aggregation. **goslogx** provides pre-defined DTOs:
 
-goslogx.Info(ctx, traceID, "payment-service", goslogx.MESSSAGE_TYPE_OUT, "calling external api", extData)
+| DTO | Category | Use Case |
+|-----|----------|----------|
+| `HTTPData` | Web | Logging Request/Response details and Latency. |
+| `DBData` | Storage | Logging Queries, Drivers, and Execution Time. |
+| `MQData` | Messaging | Logging Kafka/RabbitMQ Topic, MessageID, and Payload. |
+| `GenericData` | Misc | Flexible schema for 3rd-party API integrations (Stripe, etc). |
+
+## 🔍 Compact Stack Traces
+
+Standard Zap stack traces are bulky. **goslogx** transforms them into a single-line readable format:
+
+**Before:**
+```text
+goroutine 1 [running]:
+main.main()
+    /app/main.go:15 +0x12
 ```
 
-## Output Format
-
-Logs are output in JSON format:
-
+**After (JSON output):**
 ```json
-{
-  "level": "info",
-  "time": "2024-01-09T10:00:00Z",
-  "application_name": "my-service-name",
-  "trace_id": "trace-123",
-  "module": "user-repo",
-  "msg_type": "OUT",
-  "severity": "INFO",
-  "msg": "query executed",
-  "data": {
-    "driver": "postgres",
-    "operation": "SELECT",
-    "table": "users",
-    "statement": "SELECT * FROM users WHERE id = $1",
-    "duration_ms": 45
-  }
-}
+"stack_trace": "[goroutine 1 | main.main | /app/main.go:15]"
 ```
 
-## License
+## 📄 License
 
-MIT
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
