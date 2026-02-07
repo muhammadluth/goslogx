@@ -3,10 +3,14 @@ package goslogx
 import (
 	"bytes"
 	"errors"
+	"os"
+	"os/exec"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
+	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
 
@@ -588,4 +592,196 @@ func (m *mockArrayEncoder) AppendObject(obj zapcore.ObjectMarshaler) error {
 
 func (m *mockArrayEncoder) AppendReflected(v any) error {
 	return nil
+}
+
+// TestInstanceLogging covers (l *Logger) methods
+func TestInstanceLogging(t *testing.T) {
+	buf := &bytes.Buffer{}
+	logger := setupLog(WithOutput(buf), WithServiceName("test-instance"))
+	traceID := "trace-123"
+
+	t.Run("Error", func(t *testing.T) {
+		buf.Reset()
+		logger.Error(traceID, "mod", errors.New("instance error"))
+		if !strings.Contains(buf.String(), "instance error") {
+			t.Errorf("Expected output to contain 'instance error', got %s", buf.String())
+		}
+	})
+
+	t.Run("Warning", func(t *testing.T) {
+		buf.Reset()
+		logger.Warning(traceID, "mod", "warn msg", map[string]string{"foo": "bar"})
+		if !strings.Contains(buf.String(), "warn msg") {
+			t.Errorf("Expected output to contain 'warn msg', got %s", buf.String())
+		}
+	})
+
+	t.Run("Debug", func(t *testing.T) {
+		buf.Reset()
+		// Re-setup with debug level to cover the branch
+		debugLogger := setupLog(WithOutput(buf), WithDebug(true))
+		debugLogger.Debug(traceID, "mod", MESSSAGE_TYPE_EVENT, "debug msg", map[string]string{"foo": "bar"})
+		if !strings.Contains(buf.String(), "debug msg") {
+			t.Errorf("Expected output to contain 'debug msg', got %s", buf.String())
+		}
+	})
+
+	t.Run("Info", func(t *testing.T) {
+		buf.Reset()
+		logger.Info(traceID, "mod", MESSSAGE_TYPE_EVENT, "info msg", map[string]string{"foo": "bar"})
+		if !strings.Contains(buf.String(), "info msg") {
+			t.Errorf("Expected output to contain 'info msg', got %s", buf.String())
+		}
+	})
+}
+
+// TestInstanceFatal covers (l *Logger) Fatal
+func TestInstanceFatal(t *testing.T) {
+	if os.Getenv("BE_CRASHER_INSTANCE") == "1" {
+		logger := setupLog(WithServiceName("crash-service"))
+		logger.Fatal("trace-crash", "main", errors.New("critical failure"))
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestInstanceFatal")
+	cmd.Env = append(os.Environ(), "BE_CRASHER_INSTANCE=1")
+	err := cmd.Run()
+
+	if e, ok := err.(*exec.ExitError); ok && !e.Success() {
+		return
+	}
+	t.Fatalf("process ran with err %v, want exit status 1", err)
+}
+
+// TestDetectCallerSkipEdgeCases covers deep stack and failures
+func TestDetectCallerSkipEdgeCases(t *testing.T) {
+	t.Run("DeepStack", func(t *testing.T) {
+		var callDeep func(int) int
+		callDeep = func(n int) int {
+			if n <= 0 {
+				return detectCallerSkip()
+			}
+			return callDeep(n - 1)
+		}
+		// Max depth is 15 in caller.go
+		skip := callDeep(20)
+		if skip != 2 { // Fallback value
+			t.Errorf("Expected fallback skip 2 for deep stack, got %d", skip)
+		}
+	})
+}
+
+// TestDataFieldUnsupported covers fallback to zap.Any
+func TestDataFieldUnsupported(t *testing.T) {
+	// Channels are unsupported for specialized masking
+	ch := make(chan int)
+	field := dataField("chan", ch)
+	if field.Type == zap.Skip().Type {
+		t.Error("Expected non-skip field for channel")
+	}
+
+	// Function is also unsupported
+	fn := func() {}
+	field = dataField("func", fn)
+	if field.Type == zap.Skip().Type {
+		t.Error("Expected non-skip field for func")
+	}
+}
+
+// TestMaskingEdgeCases covers remaining branches in masking.go
+func TestMaskingEdgeCases(t *testing.T) {
+	t.Run("InvalidJSONString", func(t *testing.T) {
+		input := "{invalid"
+		result := maskJSONString(input)
+		if result != input {
+			t.Errorf("Expected original string for invalid JSON, got %s", result)
+		}
+	})
+
+	t.Run("MarshalFailure", func(t *testing.T) {
+		// Just ensure invalid JSON doesn't crash
+		input := `{"foo":`
+		result := maskJSONString(input)
+		if result != input {
+			t.Errorf("Expected original string, got %s", result)
+		}
+	})
+
+	t.Run("MarshalLogArrayNilPointer", func(t *testing.T) {
+		type S struct{ Name string }
+		var nilPtr *S
+		slice := []*S{nilPtr}
+		arr := maskedArray{v: reflect.ValueOf(slice)}
+		enc := &mockArrayEncoder{}
+		_ = arr.MarshalLogArray(enc)
+	})
+
+	t.Run("MarshalLogArrayPointerToStruct", func(t *testing.T) {
+		type S struct{ Name string }
+		s := S{Name: "test"}
+		slice := []*S{&s}
+		arr := maskedArray{v: reflect.ValueOf(slice)}
+		enc := &mockArrayEncoder{}
+		_ = arr.MarshalLogArray(enc)
+	})
+}
+
+// TestDataFieldMoreTypes covers remaining branches
+func TestDataFieldMoreTypes(t *testing.T) {
+	t.Run("Complex", func(t *testing.T) {
+		dataField("c64", complex64(1+2i))
+		dataField("c128", complex128(1+2i))
+	})
+
+	t.Run("PrimitiveArray", func(t *testing.T) {
+		arr := [2]int{1, 2}
+		dataField("arr", arr)
+	})
+
+	t.Run("NilPointerToStruct", func(t *testing.T) {
+		type S struct{}
+		var s *S
+		field := dataField("nilstruct", s)
+		if field.Type != zap.Skip().Type {
+			t.Error("Expected skip for nil struct pointer")
+		}
+	})
+
+	t.Run("PointerToDTOS", func(t *testing.T) {
+		dataField("http", &HTTPData{})
+		dataField("db", &DBData{})
+		dataField("mq", &MQData{})
+		dataField("gen", &GenericData{})
+	})
+
+	t.Run("ReflectionFallback", func(t *testing.T) {
+		// Test recursion and fallback
+		type Nested struct {
+			S string
+		}
+		type Top struct {
+			N Nested
+		}
+		dataField("top", Top{N: Nested{S: "test"}})
+
+		// Map fallback
+		dataField("map", map[string]int{"a": 1})
+	})
+}
+
+// TestMaskedObjectEdgeCases covers non-structs in MarshalLogObject
+func TestMaskedObjectEdgeCases(t *testing.T) {
+	t.Run("NonStructPointer", func(t *testing.T) {
+		i := 10
+		obj := maskedObject{v: &i}
+		enc := zapcore.NewMapObjectEncoder()
+		_ = obj.MarshalLogObject(enc)
+	})
+
+	t.Run("NilPointer", func(t *testing.T) {
+		var i *int
+		obj := maskedObject{v: i}
+		enc := zapcore.NewMapObjectEncoder()
+		_ = obj.MarshalLogObject(enc)
+	})
 }

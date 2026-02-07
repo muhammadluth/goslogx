@@ -306,7 +306,7 @@ func Fatal(traceID string, module string, err error) {
 	fields := getFields()
 	defer putFields(fields)
 
-	logger := globalLog.Load().logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(2))
+	logger := globalLog.Load().logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(detectCallerSkip()))
 	fields = append(fields,
 		zap.String("trace_id", traceID),
 		zap.String("module", module),
@@ -337,7 +337,7 @@ func Error(traceID string, module string, err error) {
 	fields := getFields()
 	defer putFields(fields)
 
-	logger := globalLog.Load().logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(2))
+	logger := globalLog.Load().logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(detectCallerSkip()))
 	fields = append(fields,
 		zap.String("trace_id", traceID),
 		zap.String("module", module),
@@ -369,7 +369,7 @@ func Warning(traceID string, module string, msg string, data any) {
 	fields := getFields()
 	defer putFields(fields)
 
-	logger := globalLog.Load().logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(2))
+	logger := globalLog.Load().logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(detectCallerSkip()))
 	fields = append(fields,
 		zap.String("trace_id", traceID),
 		zap.String("module", module),
@@ -438,7 +438,7 @@ func Debug(traceID string, module string, msgType MsgType, msg string, data any)
 	fields := getFields()
 	defer putFields(fields)
 
-	logger := globalLog.Load().logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(2))
+	logger := globalLog.Load().logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(detectCallerSkip()))
 	fields = append(fields,
 		zap.String("trace_id", traceID),
 		zap.String("module", module),
