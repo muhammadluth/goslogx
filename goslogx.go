@@ -303,7 +303,18 @@ func (l *Logger) Fatal(traceID string, module string, err error) {
 
 // Fatal logs a critical error using the global logger and terminates the process.
 func Fatal(traceID string, module string, err error) {
-	globalLog.Load().Fatal(traceID, module, err)
+	fields := getFields()
+	defer putFields(fields)
+
+	logger := globalLog.Load().logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(2))
+	fields = append(fields,
+		zap.String("trace_id", traceID),
+		zap.String("module", module),
+		zap.Error(err),
+		zap.String("severity", severityCritical),
+	)
+
+	logger.Log(zapcore.FatalLevel, "fatal error occurred", fields...)
 }
 
 // Error logs an error event with automatic stack trace capture.
@@ -323,7 +334,17 @@ func (l *Logger) Error(traceID string, module string, err error) {
 
 // Error logs an error event using the global logger with automatic stack trace capture.
 func Error(traceID string, module string, err error) {
-	globalLog.Load().Error(traceID, module, err)
+	fields := getFields()
+	defer putFields(fields)
+
+	logger := globalLog.Load().logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(2))
+	fields = append(fields,
+		zap.String("trace_id", traceID),
+		zap.String("module", module),
+		zap.Error(err),
+		zap.String("severity", severityError),
+	)
+	logger.Log(zapcore.ErrorLevel, "error occurred", fields...)
 }
 
 // Warning logs a warning-level message with optional context data.
@@ -345,7 +366,19 @@ func (l *Logger) Warning(traceID string, module string, msg string, data any) {
 
 // Warning logs a warning-level message using the global logger with optional context data.
 func Warning(traceID string, module string, msg string, data any) {
-	globalLog.Load().Warning(traceID, module, msg, data)
+	fields := getFields()
+	defer putFields(fields)
+
+	logger := globalLog.Load().logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(2))
+	fields = append(fields,
+		zap.String("trace_id", traceID),
+		zap.String("module", module),
+		zap.String("severity", severityWarning),
+	)
+	if data != nil {
+		fields = append(fields, zap.Any("data", data))
+	}
+	logger.Log(zapcore.WarnLevel, msg, fields...)
 }
 
 // Info logs an informational message with a specified message type.
@@ -367,7 +400,19 @@ func (l *Logger) Info(traceID string, module string, msgType MsgType, msg string
 
 // Info logs an informational message using the global logger with a specified message type.
 func Info(traceID string, module string, msgType MsgType, msg string, data any) {
-	globalLog.Load().Info(traceID, module, msgType, msg, data)
+	fields := getFields()
+	defer putFields(fields)
+
+	fields = append(fields,
+		zap.String("trace_id", traceID),
+		zap.String("module", module),
+		zap.String("msg_type", string(msgType)),
+		zap.String("severity", severityInfo),
+	)
+	if data != nil {
+		fields = append(fields, dataField("data", data))
+	}
+	globalLog.Load().logger.Log(zapcore.InfoLevel, msg, fields...)
 }
 
 // Debug logs a debug-level message with a specified message type.
@@ -390,5 +435,18 @@ func (l *Logger) Debug(traceID string, module string, msgType MsgType, msg strin
 
 // Debug logs a debug-level message using the global logger with a specified message type.
 func Debug(traceID string, module string, msgType MsgType, msg string, data any) {
-	globalLog.Load().Debug(traceID, module, msgType, msg, data)
+	fields := getFields()
+	defer putFields(fields)
+
+	logger := globalLog.Load().logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(2))
+	fields = append(fields,
+		zap.String("trace_id", traceID),
+		zap.String("module", module),
+		zap.String("msg_type", string(msgType)),
+		zap.String("severity", severityDebug),
+	)
+	if data != nil {
+		fields = append(fields, zap.Any("data", data))
+	}
+	logger.Log(zapcore.DebugLevel, msg, fields...)
 }
