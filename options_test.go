@@ -59,6 +59,25 @@ func TestOptions(t *testing.T) {
 			}
 		})
 	})
+
+	t.Run("WithTracing", func(t *testing.T) {
+		cfg := defaultConfig()
+		WithTracing()(cfg)
+		if !cfg.Tracing.Enabled || cfg.Tracing.OTLP {
+			t.Errorf("unexpected tracing config: %#v", cfg.Tracing)
+		}
+	})
+
+	t.Run("WithOTLPTracing", func(t *testing.T) {
+		cfg := defaultConfig()
+		WithOTLPTracing("http://alloy:4317")(cfg)
+		if !cfg.Tracing.Enabled || !cfg.Tracing.OTLP {
+			t.Errorf("unexpected tracing config: %#v", cfg.Tracing)
+		}
+		if cfg.Tracing.Endpoint != "http://alloy:4317" {
+			t.Errorf("Endpoint = %q", cfg.Tracing.Endpoint)
+		}
+	})
 }
 
 func TestDefaultConfig(t *testing.T) {

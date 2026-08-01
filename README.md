@@ -39,7 +39,7 @@
 go get github.com/muhammadluth/goslogx
 ```
 
-**Requirements:** Go 1.21+
+**Requirements:** Go 1.24+
 
 ## 🚀 Quick Start
 
@@ -74,6 +74,140 @@ func main() {
     }
 }
 ```
+
+## OpenTelemetry Trace Correlation
+
+`goslogx` can own the OpenTelemetry Trace SDK, `TracerProvider`, W3C propagation,
+and OTLP/gRPC trace exporter. Applications only import `goslogx`; they do not
+need to import or initialize OpenTelemetry packages themselves. OpenTelemetry
+dependencies are installed transitively with this library.
+
+Enable OTLP tracing once during application startup:
+
+```go
+logger := goslogx.New(
+    goslogx.WithServiceName("payment-service"),
+    goslogx.WithMasking(true),
+    goslogx.WithOTLPTracing("http://alloy:4317"),
+)
+
+if err := logger.TracingError(); err != nil {
+    log.Fatal(err)
+}
+
+defer func() {
+    shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    _ = logger.Shutdown(shutdownCtx)
+}()
+
+func HandlePayment(ctx context.Context) {
+    logger.InfoContext(
+        ctx,
+        "payment-handler",
+        goslogx.MessageTypeEvent,
+        "payment received",
+        map[string]any{
+            "status": "received",
+        },
+    )
+}
+```
+
+When `InfoContext` or another context API receives a context without an active
+span, `goslogx` automatically creates and ends a short span for that log. The
+log therefore receives `trace_id`, `span_id`, and `trace_flags` without any
+application-level OpenTelemetry code:
+
+```go
+goslogx.InfoContext(
+    context.Background(),
+    "payment-handler",
+    goslogx.MessageTypeEvent,
+    "payment received",
+    data,
+)
+```
+
+To group multiple logs into one trace, use the library-level lifecycle helper:
+
+```go
+ctx, endTrace := goslogx.StartTrace(ctx, "process-payment")
+defer endTrace()
+
+goslogx.InfoContext(ctx, "payment", goslogx.MessageTypeEvent, "payment started", nil)
+goslogx.WarningContext(ctx, "payment", "provider response was slow", nil)
+goslogx.ErrorContext(ctx, "payment", err)
+```
+
+For cross-service HTTP propagation, the application still only calls `goslogx`:
+
+```go
+// Incoming request
+ctx := goslogx.ExtractHTTPContext(r.Context(), r.Header)
+ctx, endTrace := goslogx.StartTrace(ctx, "POST /payments")
+defer endTrace()
+
+// Outgoing request
+goslogx.InjectHTTPContext(ctx, outboundRequest.Header)
+```
+
+For local correlation without any network exporter, use:
+
+```go
+goslogx.New(
+    goslogx.WithServiceName("payment-service"),
+    goslogx.WithTracing(),
+)
+```
+
+The package-level `DebugContext`, `InfoContext`, `WarningContext`,
+`ErrorContext`, `FatalContext`, `StartTrace`, `Shutdown`, and `TracingError`
+functions use the global logger configured by `New`.
+
+A traced log produces output like:
+
+```json
+{
+  "level": "info",
+  "time": "2026-07-29T16:00:00+07:00",
+  "msg": "payment received",
+  "application_name": "payment-service",
+  "trace_id": "c157bd358d20626a78eb4182fb353753",
+  "span_id": "6e642e0aa213d5ab",
+  "trace_flags": "01",
+  "module": "payment-handler",
+  "msg_type": "EVENT",
+  "severity": "INFO",
+  "data": {
+    "status": "received"
+  }
+}
+```
+
+The recommended log pipeline is:
+
+```text
+goslogx JSON stdout
+    → Grafana Alloy
+    → Loki
+```
+
+Trace export is handled inside `goslogx`:
+
+```text
+goslogx OpenTelemetry Trace SDK
+    → OTLP
+    → Grafana Alloy
+    → Tempo
+```
+
+This allows a Loki `trace_id` to link to its Tempo trace. Avoid enabling both
+`stdout → Alloy → Loki` and `OTLP logs → Alloy → Loki` for the same log stream,
+as that would duplicate entries. `goslogx` sends traces—not logs—through OTLP;
+logs continue to use only the stdout/writer path. A runnable example requiring
+no application-level OpenTelemetry import is available at
+[`examples/otel_trace_correlation`](examples/otel_trace_correlation).
 
 ### HTTP Request/Response Logging with Auto-Masking
 
@@ -237,6 +371,19 @@ Benchmarks run on: `Intel Core i5-12400F @ 2.5GHz, 12 cores`
 | `WarningNoData` | 1,582 ns | 6 | 449 B |
 | `WarningWithDTO` | 3,084 ns | 14 | 770 B |
 | `Error` | 2,041 ns | 7 | 465 B |
+
+OpenTelemetry correlation benchmarks (`Apple M1 Pro`, Go 1.24):
+
+| Benchmark | Time/op | Allocs/op | Bytes/op |
+|-----------|---------|-----------|----------|
+| `InfoContextWithSpan` | 4,123 ns | 16 | 1,267 B |
+| `InfoContextWithoutSpan` | 3,438 ns | 13 | 1,211 B |
+| `ErrorContextWithSpan` | 3,706 ns | 16 | 1,267 B |
+| `InfoContextAutoSpan` | 4,273 ns | 19 | 1,821 B |
+
+The context APIs perform SpanContext extraction and caller detection in
+addition to regular JSON encoding. Run `go test -bench='Context' -benchmem
+./...` on your deployment platform for representative results.
 
 ### JSON Masking Performance
 

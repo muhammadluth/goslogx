@@ -25,6 +25,9 @@ type Config struct {
 
 	// Masking controls automatic field masking behavior.
 	Masking MaskingConfig
+
+	// Tracing controls OpenTelemetry tracing owned by goslogx.
+	Tracing TracingConfig
 }
 
 // MaskingConfig controls field masking behavior.
@@ -33,6 +36,19 @@ type MaskingConfig struct {
 	// When true, struct fields tagged with log:"masked:*" will be masked.
 	// Default: true
 	Enabled bool
+}
+
+// TracingConfig controls OpenTelemetry tracing initialization.
+type TracingConfig struct {
+	// Enabled creates an OpenTelemetry TracerProvider inside goslogx.
+	Enabled bool
+
+	// OTLP enables exporting spans through OTLP/gRPC.
+	OTLP bool
+
+	// Endpoint is the OTLP/gRPC collector URL. An empty value lets the
+	// OpenTelemetry exporter read the standard OTEL_EXPORTER_OTLP_* variables.
+	Endpoint string
 }
 
 // Option configures a Logger.
@@ -89,6 +105,27 @@ func WithDebug(debug bool) Option {
 func WithMasking(masking bool) Option {
 	return func(c *Config) {
 		c.Masking.Enabled = masking
+	}
+}
+
+// WithTracing enables tracing managed by goslogx without a network exporter.
+// It is useful for local correlation and tests. Applications only interact
+// with goslogx APIs and do not need to import OpenTelemetry packages.
+func WithTracing() Option {
+	return func(c *Config) {
+		c.Tracing.Enabled = true
+	}
+}
+
+// WithOTLPTracing enables tracing managed by goslogx and exports spans using
+// OTLP/gRPC. endpoint may be a URL such as "http://alloy:4317"; when empty,
+// standard OTEL_EXPORTER_OTLP_* environment variables configure the exporter.
+// Applications do not need to import OpenTelemetry packages.
+func WithOTLPTracing(endpoint string) Option {
+	return func(c *Config) {
+		c.Tracing.Enabled = true
+		c.Tracing.OTLP = true
+		c.Tracing.Endpoint = endpoint
 	}
 }
 

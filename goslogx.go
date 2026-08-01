@@ -4,10 +4,7 @@
 //
 // Basic Usage:
 //
-//	logger, err := goslogx.New(goslogx.WithServiceName("my-service"))
-//	if err != nil {
-//		log.Fatal(err)
-//	}
+//	logger := goslogx.New(goslogx.WithServiceName("my-service"))
 //	logger.Info("trace-001", "handler", goslogx.MessageTypeEvent, "request received", nil)
 package goslogx
 
@@ -17,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -38,13 +37,16 @@ func init() {
 //
 // Example:
 //
-//	logger, err := goslogx.New(
+//	logger := goslogx.New(
 //		goslogx.WithServiceName("my-service"),
-//		goslogx.WithLevel(zapcore.DebugLevel),
+//		goslogx.WithDebug(true),
 //	)
 type Logger struct {
-	logger *zap.Logger
-	config *Config
+	logger         *zap.Logger
+	config         *Config
+	tracer         trace.Tracer
+	tracerProvider *sdktrace.TracerProvider
+	tracingErr     error
 }
 
 // formatStackTraceBytes formats a stack trace string into a compact, bracketed format.
@@ -77,6 +79,7 @@ func formatStackTraceBytes(dst *bytes.Buffer, stackStr string) {
 type stackTraceFormattingWriter struct {
 	io.Writer               // Underlying writer for formatted output
 	buf       *bytes.Buffer // Pre-allocated 1KB buffer reused across writes to minimize allocations
+	mu        sync.Mutex    // Serializes access to the reusable buffer and underlying writer
 }
 
 // Write implements io.Writer and formats stack traces in JSON output.
@@ -90,6 +93,9 @@ type stackTraceFormattingWriter struct {
 // 4. Formats the stack trace with pipe separators and brackets
 // 5. Writes the modified JSON back to the underlying writer
 func (w *stackTraceFormattingWriter) Write(p []byte) (n int, err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	// Fast path: only process if there's a stack_trace field
 	// This avoids unnecessary processing for non-error logs
 	if !bytes.Contains(p, []byte("\"stack_trace\":\"")) {
@@ -191,6 +197,9 @@ func decodeJSONString(b []byte) string {
 // It attempts to sync the underlying writer if it supports the WriteSyncer interface,
 // otherwise it returns nil (no-op for writers that don't support syncing).
 func (w *stackTraceFormattingWriter) Sync() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	if syncer, ok := w.Writer.(zapcore.WriteSyncer); ok {
 		return syncer.Sync()
 	}
@@ -250,10 +259,12 @@ func setupLog(opts ...Option) *Logger {
 		zap.AddStacktrace(zapcore.FatalLevel),
 	).With(zap.String("application_name", cfg.ServiceName))
 
-	return &Logger{
+	result := &Logger{
 		logger: logger,
 		config: cfg,
 	}
+	result.tracer, result.tracerProvider, result.tracingErr = setupTracing(cfg)
+	return result
 }
 
 // Severity level constants for Cloud Logging compatibility.
@@ -267,10 +278,10 @@ const (
 )
 
 // fieldPool reuses zap.Field slices to reduce allocations.
-// Capacity of 6 is the maximum number of fields used in any logging function:
-// trace_id, module, msg_type, severity, data, error = 6 fields max
+// Capacity of 8 covers the maximum fields used by context logging:
+// trace_id, span_id, trace_flags, module, msg_type, severity, data/error.
 var fieldPool = sync.Pool{
-	New: func() any { return make([]zap.Field, 0, 6) },
+	New: func() any { return make([]zap.Field, 0, 8) },
 }
 
 // getFields retrieves a field slice from the pool.
@@ -282,6 +293,7 @@ func getFields() []zap.Field {
 // putFields returns a field slice to the pool for reuse.
 // Resets the slice to zero length before returning.
 func putFields(f []zap.Field) {
+	clear(f[:cap(f)])
 	fieldPool.Put(f[:0])
 }
 
