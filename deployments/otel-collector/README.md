@@ -1,0 +1,82 @@
+# Production Collector reference
+
+This directory contains an adaptable trace pipeline for `goslogx`:
+
+```text
+application -> OTLP/gRPC receiver -> memory limiter -> resource -> batch
+            -> persistent sending queue + retry -> Tempo/OTLP backend
+```
+
+The root [`otel-collector.yaml`](../../otel-collector.yaml) is the canonical
+Collector configuration. It enables health checks, JSON internal logs,
+Prometheus internal metrics, retry, and a disk-backed exporter queue. Tail
+sampling policies are included but intentionally omitted from the active
+pipeline.
+
+## Local Docker Compose
+
+Run the Collector and a development Tempo backend:
+
+```bash
+docker compose -f deployments/otel-collector/docker-compose.yaml up -d
+curl --fail http://127.0.0.1:13133/
+curl --fail http://127.0.0.1:8888/metrics
+```
+
+Configure the application with endpoint `127.0.0.1:4317` and `Insecure: true`.
+Tempo's query API is available at `http://127.0.0.1:3200`. The bundled Tempo
+uses local storage and is intended for development, not production HA.
+
+## Persistent queue and retry
+
+`file_storage` turns the exporter's sending queue into a persistent queue. It
+can survive process restarts, but it is not an unlimited archive: size the
+volume, alert on queue growth and failed sends, and back up or replicate the
+backend independently. Remove `storage: file_storage` for an in-memory queue.
+Removing the extension also requires removing it from `service.extensions`.
+
+Important internal metrics include exporter send failures, queue capacity and
+queue size. Scrape port `8888` and alert before the queue or disk fills.
+
+## Tail sampling
+
+To enable the supplied policies, add `tail_sampling` between
+`resource/deployment` and `batch`. Tail sampling requires all spans for a trace
+to reach the same sampling Collector and buffers traces until its decision
+window expires. Before enabling it:
+
+- load test memory usage and `num_traces`;
+- route each trace consistently when scaling horizontally;
+- decide whether errors and slow traces must always be retained;
+- avoid sampling the same trace independently at multiple Collector replicas.
+
+Head sampling in `goslogx` happens before tail sampling. A trace discarded by
+head sampling can never be recovered by the Collector.
+
+## TLS and authentication
+
+[`tls-auth-example.yaml`](tls-auth-example.yaml) demonstrates receiver mTLS,
+Basic authentication, backend TLS/mTLS, and an authorization header. Mount
+certificates and htpasswd files from a secret manager. Supply
+`BACKEND_AUTHORIZATION` through a secret reference and never commit it.
+
+For `goslogx`, use the Collector CA in `TracingConfig.TLSConfig` and set the
+matching `authorization` header. Do not use `Insecure` outside a trusted local
+network.
+
+## Kubernetes
+
+[`kubernetes.yaml`](kubernetes.yaml) provides a ConfigMap, Service, hardened
+StatefulSet, health probes, resource limits, and a persistent volume claim for
+the queue:
+
+```bash
+kubectl create namespace observability
+kubectl apply -f deployments/otel-collector/kubernetes.yaml
+```
+
+Replace the cluster name, backend endpoint, storage class, resource sizing,
+and insecure backend transport before production. The example has one replica
+because a disk-backed queue and tail-aware horizontal scaling require an
+explicit sharding and storage design.
+

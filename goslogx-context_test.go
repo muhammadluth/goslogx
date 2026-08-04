@@ -12,13 +12,24 @@ import (
 	"sync"
 	"testing"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 )
 
 const (
-	testTraceID = "c157bd358d20626a78eb4182fb353753"
-	testSpanID  = "6e642e0aa213d5ab"
+	testTraceID       = "c157bd358d20626a78eb4182fb353753"
+	testSpanID        = "6e642e0aa213d5ab"
+	obsTraceIDKey     = "obs_trace_id"
+	obsSpanIDKey      = "obs_span_id"
+	obsTraceFlagsKey  = "obs_trace_flags"
+	testTraceFlags    = "01"
+	testCorrelationID = "request-123"
 )
+
+var obsFieldKeys = [...]string{obsTraceIDKey, obsSpanIDKey, obsTraceFlagsKey}
 
 func contextWithTestSpan(t testing.TB) context.Context {
 	t.Helper()
@@ -50,19 +61,44 @@ func decodeLogLine(t testing.TB, output string) map[string]any {
 	return entry
 }
 
+func assertTraceCorrelation(t testing.TB, entry map[string]any) {
+	t.Helper()
+
+	expected := map[string]string{
+		obsTraceIDKey:    testTraceID,
+		obsSpanIDKey:     testSpanID,
+		obsTraceFlagsKey: testTraceFlags,
+	}
+	for key, want := range expected {
+		if got := entry[key]; got != want {
+			t.Errorf("%s = %v, want %q", key, got, want)
+		}
+	}
+}
+
+func assertNoTraceCorrelation(t testing.TB, entry map[string]any) {
+	t.Helper()
+
+	for _, key := range obsFieldKeys {
+		if _, exists := entry[key]; exists {
+			t.Errorf("unexpected %s field: %#v", key, entry)
+		}
+	}
+}
+
 func TestAppendOTELFields(t *testing.T) {
 	t.Run("valid span context", func(t *testing.T) {
 		fields := appendOTELFields(contextWithTestSpan(t), nil)
 		if len(fields) != 3 {
 			t.Fatalf("got %d fields, want 3", len(fields))
 		}
-		if fields[0].Key != "trace_id" || fields[0].String != testTraceID {
+		if fields[0].Key != obsTraceIDKey || fields[0].String != testTraceID {
 			t.Errorf("unexpected trace field: %#v", fields[0])
 		}
-		if fields[1].Key != "span_id" || fields[1].String != testSpanID {
+		if fields[1].Key != obsSpanIDKey || fields[1].String != testSpanID {
 			t.Errorf("unexpected span field: %#v", fields[1])
 		}
-		if fields[2].Key != "trace_flags" || fields[2].String != "01" {
+		if fields[2].Key != obsTraceFlagsKey || fields[2].String != testTraceFlags {
 			t.Errorf("unexpected trace flags field: %#v", fields[2])
 		}
 	})
@@ -87,6 +123,7 @@ func TestInfoContext(t *testing.T) {
 
 	logger.InfoContext(
 		contextWithTestSpan(t),
+		testCorrelationID,
 		"payment-handler",
 		MESSSAGE_TYPE_EVENT,
 		"payment received",
@@ -94,10 +131,9 @@ func TestInfoContext(t *testing.T) {
 	)
 
 	entry := decodeLogLine(t, output.String())
+	assertTraceCorrelation(t, entry)
 	expected := map[string]string{
-		"trace_id":         testTraceID,
-		"span_id":          testSpanID,
-		"trace_flags":      "01",
+		"trace_id":         testCorrelationID,
 		"msg":              "payment received",
 		"module":           "payment-handler",
 		"msg_type":         "EVENT",
@@ -122,17 +158,13 @@ func TestContextWithoutValidSpan(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var output bytes.Buffer
 			logger := setupLog(WithOutput(&output))
-			logger.InfoContext(tt.ctx, "module", MESSSAGE_TYPE_EVENT, "still logged", nil)
+			logger.InfoContext(tt.ctx, testCorrelationID, "module", MESSSAGE_TYPE_EVENT, "still logged", nil)
 
 			entry := decodeLogLine(t, output.String())
 			if entry["msg"] != "still logged" {
 				t.Errorf("msg = %v, want still logged", entry["msg"])
 			}
-			for _, key := range []string{"trace_id", "span_id", "trace_flags"} {
-				if _, exists := entry[key]; exists {
-					t.Errorf("unexpected %s field in invalid context log", key)
-				}
-			}
+			assertNoTraceCorrelation(t, entry)
 		})
 	}
 }
@@ -143,7 +175,7 @@ func TestContextLogLevelsAndError(t *testing.T) {
 	t.Run("warning", func(t *testing.T) {
 		var output bytes.Buffer
 		logger := setupLog(WithOutput(&output))
-		logger.WarningContext(ctx, "cache", "latency warning", nil)
+		logger.WarningContext(ctx, testCorrelationID, "cache", "latency warning", nil)
 
 		entry := decodeLogLine(t, output.String())
 		if entry["severity"] != "WARNING" || entry["level"] != "warn" {
@@ -154,7 +186,7 @@ func TestContextLogLevelsAndError(t *testing.T) {
 	t.Run("error", func(t *testing.T) {
 		var output bytes.Buffer
 		logger := setupLog(WithOutput(&output))
-		logger.ErrorContext(ctx, "database", errors.New("connection failed"))
+		logger.ErrorContext(ctx, testCorrelationID, "database", errors.New("connection failed"))
 
 		entry := decodeLogLine(t, output.String())
 		if entry["severity"] != "ERROR" || entry["level"] != "error" {
@@ -163,25 +195,23 @@ func TestContextLogLevelsAndError(t *testing.T) {
 		if entry["error"] != "connection failed" {
 			t.Errorf("error = %v, want connection failed", entry["error"])
 		}
-		if entry["trace_id"] != testTraceID || entry["span_id"] != testSpanID {
-			t.Errorf("missing error correlation fields: %#v", entry)
-		}
+		assertTraceCorrelation(t, entry)
 		source, ok := entry["source"].(string)
-		if !ok || source == "" || strings.Contains(source, "otel_context.go") {
+		if !ok || source == "" || strings.Contains(source, "goslogx.go") {
 			t.Errorf("unexpected caller source: %v", entry["source"])
 		}
 	})
 
 	t.Run("debug level", func(t *testing.T) {
 		var disabledOutput bytes.Buffer
-		setupLog(WithOutput(&disabledOutput)).DebugContext(ctx, "module", MESSSAGE_TYPE_EVENT, "debug", nil)
+		setupLog(WithOutput(&disabledOutput)).DebugContext(ctx, testCorrelationID, "module", MESSSAGE_TYPE_EVENT, "debug", nil)
 		if disabledOutput.Len() != 0 {
 			t.Errorf("debug log written at default info level: %s", disabledOutput.String())
 		}
 
 		var enabledOutput bytes.Buffer
 		setupLog(WithOutput(&enabledOutput), WithDebug(true)).
-			DebugContext(ctx, "module", MESSSAGE_TYPE_EVENT, "debug", nil)
+			DebugContext(ctx, testCorrelationID, "module", MESSSAGE_TYPE_EVENT, "debug", nil)
 		entry := decodeLogLine(t, enabledOutput.String())
 		if entry["severity"] != "DEBUG" || entry["level"] != "debug" {
 			t.Errorf("unexpected debug levels: %#v", entry)
@@ -198,7 +228,7 @@ func TestContextMaskingAndLegacyTraceID(t *testing.T) {
 	t.Run("context data remains masked", func(t *testing.T) {
 		var output bytes.Buffer
 		logger := setupLog(WithOutput(&output), WithMasking(true))
-		logger.InfoContext(contextWithTestSpan(t), "auth", MESSSAGE_TYPE_EVENT, "login", credentials{
+		logger.InfoContext(contextWithTestSpan(t), testCorrelationID, "auth", MESSSAGE_TYPE_EVENT, "login", credentials{
 			Password: "supersecret",
 			APIKey:   "sk_live_123456",
 		})
@@ -218,9 +248,7 @@ func TestContextMaskingAndLegacyTraceID(t *testing.T) {
 		if entry["trace_id"] != "legacy-trace-id" {
 			t.Errorf("trace_id = %v, want legacy-trace-id", entry["trace_id"])
 		}
-		if _, exists := entry["span_id"]; exists {
-			t.Error("legacy API unexpectedly added span_id")
-		}
+		assertNoTraceCorrelation(t, entry)
 	})
 }
 
@@ -235,7 +263,7 @@ func TestInfoContextConcurrent(t *testing.T) {
 	for i := 0; i < goroutines; i++ {
 		go func() {
 			defer wg.Done()
-			logger.InfoContext(ctx, "worker", MESSSAGE_TYPE_EVENT, "concurrent", nil)
+			logger.InfoContext(ctx, testCorrelationID, "worker", MESSSAGE_TYPE_EVENT, "concurrent", nil)
 		}()
 	}
 	wg.Wait()
@@ -246,9 +274,7 @@ func TestInfoContextConcurrent(t *testing.T) {
 	}
 	for _, line := range lines {
 		entry := decodeLogLine(t, line)
-		if entry["trace_id"] != testTraceID || entry["span_id"] != testSpanID {
-			t.Errorf("correlation field leakage: %s", line)
-		}
+		assertTraceCorrelation(t, entry)
 	}
 }
 
@@ -257,30 +283,35 @@ func TestLibraryManagedTracing(t *testing.T) {
 	logger := setupLog(
 		WithOutput(&output),
 		WithServiceName("managed-tracing-service"),
-		WithTracing(),
 	)
+	spanRecorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spanRecorder))
+	logger.tracerProvider = provider
+	logger.tracer = provider.Tracer(instrumentationName)
+	previousPropagator := otel.GetTextMapPropagator()
+	otel.SetTextMapPropagator(newPropagator())
 	t.Cleanup(func() {
+		otel.SetTextMapPropagator(previousPropagator)
 		if err := logger.Shutdown(context.Background()); err != nil {
 			t.Errorf("Shutdown: %v", err)
 		}
 	})
 
-	t.Run("log automatically creates span", func(t *testing.T) {
+	t.Run("log without span has no trace fields", func(t *testing.T) {
 		output.Reset()
-		logger.InfoContext(context.Background(), "automatic", MESSSAGE_TYPE_EVENT, "auto span", nil)
+		logger.InfoContext(context.Background(), testCorrelationID, "untraced", MESSSAGE_TYPE_EVENT, "plain log", nil)
 		entry := decodeLogLine(t, output.String())
-		for _, key := range []string{"trace_id", "span_id", "trace_flags"} {
-			if value, ok := entry[key].(string); !ok || value == "" {
-				t.Errorf("%s missing from automatically traced log: %#v", key, entry)
-			}
+		assertNoTraceCorrelation(t, entry)
+		if spans := spanRecorder.Ended(); len(spans) != 0 {
+			t.Errorf("logging without an active span created %d span(s)", len(spans))
 		}
 	})
 
 	t.Run("StartTrace groups logs", func(t *testing.T) {
 		output.Reset()
 		ctx, end := logger.StartTrace(context.Background(), "payment")
-		logger.InfoContext(ctx, "payment", MESSSAGE_TYPE_EVENT, "first", nil)
-		logger.WarningContext(ctx, "payment", "second", nil)
+		logger.InfoContext(ctx, testCorrelationID, "payment", MESSSAGE_TYPE_EVENT, "first", nil)
+		logger.WarningContext(ctx, testCorrelationID, "payment", "second", nil)
 		end()
 
 		lines := strings.Split(strings.TrimSpace(output.String()), "\n")
@@ -289,8 +320,8 @@ func TestLibraryManagedTracing(t *testing.T) {
 		}
 		first := decodeLogLine(t, lines[0])
 		second := decodeLogLine(t, lines[1])
-		if first["trace_id"] == "" || first["trace_id"] != second["trace_id"] {
-			t.Errorf("logs do not share a trace: %v != %v", first["trace_id"], second["trace_id"])
+		if first[obsTraceIDKey] == "" || first[obsTraceIDKey] != second[obsTraceIDKey] {
+			t.Errorf("logs do not share a trace: %v != %v", first[obsTraceIDKey], second[obsTraceIDKey])
 		}
 	})
 
@@ -306,16 +337,107 @@ func TestLibraryManagedTracing(t *testing.T) {
 
 		extracted := ExtractHTTPContext(context.Background(), header)
 		output.Reset()
-		logger.InfoContext(extracted, "incoming", MESSSAGE_TYPE_EVENT, "continued", nil)
+		logger.InfoContext(extracted, testCorrelationID, "incoming", MESSSAGE_TYPE_EVENT, "continued", nil)
 		entry := decodeLogLine(t, output.String())
 		originalFields := appendOTELFields(ctx, nil)
-		if entry["trace_id"] != originalFields[0].String {
-			t.Errorf("extracted trace_id = %v, want %s", entry["trace_id"], originalFields[0].String)
+		if entry[obsTraceIDKey] != originalFields[0].String {
+			t.Errorf("extracted %s = %v, want %s", obsTraceIDKey, entry[obsTraceIDKey], originalFields[0].String)
 		}
 	})
 
 	if err := logger.TracingError(); err != nil {
 		t.Errorf("TracingError: %v", err)
+	}
+}
+
+func TestErrorContextRecordsActiveSpanError(t *testing.T) {
+	spanRecorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spanRecorder))
+	logger := setupLog(WithOutput(&discardWriter{}))
+	logger.tracer = provider.Tracer(instrumentationName)
+	t.Cleanup(func() {
+		if err := provider.Shutdown(context.Background()); err != nil {
+			t.Errorf("Shutdown: %v", err)
+		}
+	})
+
+	ctx, end := logger.StartTrace(context.Background(), "failing-operation")
+	logger.ErrorContext(ctx, testCorrelationID, "database", errors.New("connection failed"))
+	end()
+
+	spans := spanRecorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans = %d, want 1", len(spans))
+	}
+	if spans[0].Status().Code != codes.Error {
+		t.Errorf("span status = %v, want Error", spans[0].Status().Code)
+	}
+	if len(spans[0].Events()) == 0 || spans[0].Events()[0].Name != "exception" {
+		t.Errorf("span events = %#v, want recorded exception", spans[0].Events())
+	}
+}
+
+func TestTracingRequiresCollectorEndpoint(t *testing.T) {
+	logger := setupLog(WithOutput(&discardWriter{}), WithTracing(TracingConfig{}))
+	if logger.TracingError() == nil {
+		t.Fatal("TracingError() = nil, want missing collector endpoint error")
+	}
+}
+
+func TestTracingDisabledDoesNotCreateProvider(t *testing.T) {
+	tracer, provider, err := setupTracing(defaultConfig())
+	if err != nil {
+		t.Fatalf("setupTracing() error = %v", err)
+	}
+	if tracer != nil || provider != nil {
+		t.Errorf("setupTracing() = (%v, %v), want nil tracer and provider", tracer, provider)
+	}
+}
+
+func TestTraceSampler(t *testing.T) {
+	traceID, err := trace.TraceIDFromHex(testTraceID)
+	if err != nil {
+		t.Fatalf("parse trace ID: %v", err)
+	}
+	spanID, err := trace.SpanIDFromHex(testSpanID)
+	if err != nil {
+		t.Fatalf("parse span ID: %v", err)
+	}
+
+	t.Run("default samples root span", func(t *testing.T) {
+		result := newTraceSampler(TracingConfig{}).ShouldSample(sdktrace.SamplingParameters{
+			TraceID: traceID,
+			Name:    "root",
+		})
+		if result.Decision != sdktrace.RecordAndSample {
+			t.Errorf("sampling decision = %v, want RecordAndSample", result.Decision)
+		}
+	})
+
+	for _, tt := range []struct {
+		name       string
+		traceFlags trace.TraceFlags
+		want       sdktrace.SamplingDecision
+	}{
+		{name: "sampled remote parent", traceFlags: trace.FlagsSampled, want: sdktrace.RecordAndSample},
+		{name: "unsampled remote parent", traceFlags: 0, want: sdktrace.Drop},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			parent := trace.NewSpanContext(trace.SpanContextConfig{
+				TraceID:    traceID,
+				SpanID:     spanID,
+				TraceFlags: tt.traceFlags,
+				Remote:     true,
+			})
+			result := newTraceSampler(TracingConfig{SamplingRatio: 0.1}).ShouldSample(sdktrace.SamplingParameters{
+				ParentContext: trace.ContextWithRemoteSpanContext(context.Background(), parent),
+				TraceID:       traceID,
+				Name:          "child",
+			})
+			if result.Decision != tt.want {
+				t.Errorf("sampling decision = %v, want %v", result.Decision, tt.want)
+			}
+		})
 	}
 }
 
@@ -328,10 +450,10 @@ func TestGlobalContextWrappers(t *testing.T) {
 	})
 
 	ctx := contextWithTestSpan(t)
-	InfoContext(ctx, "global", MESSSAGE_TYPE_EVENT, "info", nil)
-	DebugContext(ctx, "global", MESSSAGE_TYPE_EVENT, "debug", nil)
-	WarningContext(ctx, "global", "warning", nil)
-	ErrorContext(ctx, "global", errors.New("error"))
+	InfoContext(ctx, testCorrelationID, "global", MESSSAGE_TYPE_EVENT, "info", nil)
+	DebugContext(ctx, testCorrelationID, "global", MESSSAGE_TYPE_EVENT, "debug", nil)
+	WarningContext(ctx, testCorrelationID, "global", "warning", nil)
+	ErrorContext(ctx, testCorrelationID, "global", errors.New("error"))
 
 	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
 	if len(lines) != 4 {
@@ -339,9 +461,7 @@ func TestGlobalContextWrappers(t *testing.T) {
 	}
 	for _, line := range lines {
 		entry := decodeLogLine(t, line)
-		if entry["trace_id"] != testTraceID || entry["span_id"] != testSpanID {
-			t.Errorf("global wrapper missing correlation fields: %s", line)
-		}
+		assertTraceCorrelation(t, entry)
 	}
 
 	startedCtx, end := StartTrace(nil, "disabled-tracing")
@@ -360,7 +480,7 @@ func TestGlobalContextWrappers(t *testing.T) {
 func TestFatalContext(t *testing.T) {
 	if os.Getenv("GO_WANT_FATAL_CONTEXT") == "1" {
 		globalLog.Store(setupLog(WithOutput(&discardWriter{})))
-		FatalContext(contextWithTestSpan(t), "fatal", errors.New("critical failure"))
+		FatalContext(contextWithTestSpan(t), testCorrelationID, "fatal", errors.New("critical failure"))
 		return
 	}
 
@@ -379,7 +499,7 @@ func BenchmarkInfoContextWithSpan(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		logger.InfoContext(ctx, "api", MESSSAGE_TYPE_EVENT, "request received", nil)
+		logger.InfoContext(ctx, testCorrelationID, "api", MESSSAGE_TYPE_EVENT, "request received", nil)
 	}
 }
 
@@ -389,7 +509,7 @@ func BenchmarkInfoContextWithoutSpan(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		logger.InfoContext(ctx, "api", MESSSAGE_TYPE_EVENT, "request received", nil)
+		logger.InfoContext(ctx, testCorrelationID, "api", MESSSAGE_TYPE_EVENT, "request received", nil)
 	}
 }
 
@@ -400,12 +520,15 @@ func BenchmarkErrorContextWithSpan(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		logger.ErrorContext(ctx, "api", err)
+		logger.ErrorContext(ctx, testCorrelationID, "api", err)
 	}
 }
 
-func BenchmarkInfoContextAutoSpan(b *testing.B) {
-	logger := setupLog(WithOutput(&discardWriter{}), WithTracing())
+func BenchmarkInfoContextWithoutSpanTracingEnabled(b *testing.B) {
+	logger := setupLog(WithOutput(&discardWriter{}))
+	provider := sdktrace.NewTracerProvider()
+	logger.tracerProvider = provider
+	logger.tracer = provider.Tracer(instrumentationName)
 	b.Cleanup(func() {
 		_ = logger.Shutdown(context.Background())
 	})
@@ -413,7 +536,44 @@ func BenchmarkInfoContextAutoSpan(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		logger.InfoContext(ctx, "api", MESSSAGE_TYPE_EVENT, "request received", nil)
+		logger.InfoContext(ctx, testCorrelationID, "api", MESSSAGE_TYPE_EVENT, "request received", nil)
+	}
+}
+
+func BenchmarkStartTraceDisabled(b *testing.B) {
+	logger := setupLog(WithOutput(&discardWriter{}))
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, end := logger.StartTrace(ctx, "benchmark")
+		end()
+	}
+}
+
+func BenchmarkStartTraceEnabledSampled(b *testing.B) {
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	logger := setupLog(WithOutput(&discardWriter{}), WithTracerProvider(provider))
+	b.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, end := logger.StartTrace(ctx, "benchmark")
+		end()
+	}
+}
+
+func BenchmarkStartTraceEnabledUnsampled(b *testing.B) {
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.NeverSample()))
+	logger := setupLog(WithOutput(&discardWriter{}), WithTracerProvider(provider))
+	b.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, end := logger.StartTrace(ctx, "benchmark")
+		end()
 	}
 }
 

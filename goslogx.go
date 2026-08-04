@@ -10,10 +10,13 @@ package goslogx
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"sync"
 	"sync/atomic"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
@@ -42,11 +45,20 @@ func init() {
 //		goslogx.WithDebug(true),
 //	)
 type Logger struct {
-	logger         *zap.Logger
-	config         *Config
-	tracer         trace.Tracer
-	tracerProvider *sdktrace.TracerProvider
-	tracingErr     error
+	logger              *zap.Logger
+	config              *Config
+	tracer              trace.Tracer
+	tracerProvider      *sdktrace.TracerProvider
+	configuredProvider  trace.TracerProvider
+	tracingErr          error
+	tracingClosed       atomic.Bool
+	shutdownOnce        sync.Once
+	shutdownErr         error
+	otelHandler         *rateLimitedOTelErrorHandler
+	previousOTelHandler otel.ErrorHandler
+	registeredGlobal    bool
+	previousProvider    trace.TracerProvider
+	previousPropagator  propagation.TextMapPropagator
 }
 
 // formatStackTraceBytes formats a stack trace string into a compact, bracketed format.
@@ -206,19 +218,17 @@ func (w *stackTraceFormattingWriter) Sync() error {
 	return nil
 }
 
-// New creates a new Logger instance with the given options.
-// Returns an error if logger initialization fails.
+// New configures and returns the process-global Logger. Initialization happens
+// exactly once; subsequent calls return the existing Logger. Inspect
+// TracingError for tracing initialization failures.
 //
 // Example:
 //
-//	logger, err := goslogx.New(
+//	logger := goslogx.New(
 //	    goslogx.WithServiceName("my-service"),
-//	    goslogx.WithLevel(zapcore.DebugLevel),
-//	    goslogx.WithMasking(),
-//
-// New sets the global logger configuration exactly once.
-// Subsequent calls to New will return the existing global logger.
-// Returns the global Logger instance.
+//	    goslogx.WithDebug(true),
+//	    goslogx.WithMasking(true),
+//	)
 func New(opts ...Option) *Logger {
 	once.Do(func() {
 		globalLog.Store(setupLog(opts...))
@@ -264,6 +274,23 @@ func setupLog(opts ...Option) *Logger {
 		config: cfg,
 	}
 	result.tracer, result.tracerProvider, result.tracingErr = setupTracing(cfg)
+	if result.tracingErr == nil && cfg.TracerProvider != nil {
+		result.configuredProvider = cfg.TracerProvider
+	} else if result.tracerProvider != nil {
+		result.configuredProvider = result.tracerProvider
+	}
+	if result.tracerProvider != nil && cfg.Tracing.RegisterGlobal {
+		result.previousProvider = otel.GetTracerProvider()
+		result.previousPropagator = otel.GetTextMapPropagator()
+		otel.SetTracerProvider(result.tracerProvider)
+		otel.SetTextMapPropagator(newPropagator())
+		result.registeredGlobal = true
+	}
+	if result.tracerProvider != nil {
+		result.previousOTelHandler = otel.GetErrorHandler()
+		result.otelHandler = newRateLimitedOTelErrorHandler(result.logger, cfg.Tracing.ErrorLogInterval)
+		otel.SetErrorHandler(result.otelHandler)
+	}
 	return result
 }
 
@@ -279,7 +306,7 @@ const (
 
 // fieldPool reuses zap.Field slices to reduce allocations.
 // Capacity of 8 covers the maximum fields used by context logging:
-// trace_id, span_id, trace_flags, module, msg_type, severity, data/error.
+// obs_trace_id, obs_span_id, obs_trace_flags, module, msg_type, severity, data/error.
 var fieldPool = sync.Pool{
 	New: func() any { return make([]zap.Field, 0, 8) },
 }
@@ -295,6 +322,25 @@ func getFields() []zap.Field {
 func putFields(f []zap.Field) {
 	clear(f[:cap(f)])
 	fieldPool.Put(f[:0])
+}
+
+// appendOTELFields appends trace correlation fields from a valid SpanContext.
+// It deliberately reads only the SpanContext and never records or exports data.
+func appendOTELFields(ctx context.Context, fields []zap.Field) []zap.Field {
+	if ctx == nil {
+		return fields
+	}
+
+	spanContext := trace.SpanContextFromContext(ctx)
+	if !spanContext.IsValid() {
+		return fields
+	}
+
+	return append(fields,
+		zap.String("obs_trace_id", spanContext.TraceID().String()),
+		zap.String("obs_span_id", spanContext.SpanID().String()),
+		zap.String("obs_trace_flags", spanContext.TraceFlags().String()),
+	)
 }
 
 // Fatal logs a critical error and terminates the process.
@@ -477,4 +523,214 @@ func Debug(traceID string, module string, msgType MsgType, msg string, data any)
 		fields = append(fields, zap.Any("data", data))
 	}
 	logger.Log(zapcore.DebugLevel, msg, fields...)
+}
+
+// DebugContext logs a debug message and adds trace correlation fields from ctx
+// when it contains a valid OpenTelemetry SpanContext.
+func (l *Logger) DebugContext(ctx context.Context, traceID string, module string, msgType MsgType, msg string, data any) {
+	fields := getFields()
+	defer putFields(fields)
+
+	callerSkip := detectCallerSkip()
+
+	logger := l.logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(callerSkip))
+	fields = appendOTELFields(ctx, fields)
+	fields = append(fields,
+		zap.String("trace_id", traceID),
+		zap.String("module", module),
+		zap.String("msg_type", string(msgType)),
+		zap.String("severity", severityDebug),
+	)
+	if data != nil {
+		fields = append(fields, dataField("data", data))
+	}
+	logger.Log(zapcore.DebugLevel, msg, fields...)
+}
+
+// DebugContext logs through the global logger and adds trace correlation fields
+// using the tracing and output configuration established by New.
+func DebugContext(ctx context.Context, traceID string, module string, msgType MsgType, msg string, data any) {
+	fields := getFields()
+	defer putFields(fields)
+
+	callerSkip := detectCallerSkip()
+
+	logger := globalLog.Load().logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(callerSkip))
+	fields = appendOTELFields(ctx, fields)
+	fields = append(fields,
+		zap.String("trace_id", traceID),
+		zap.String("module", module),
+		zap.String("msg_type", string(msgType)),
+		zap.String("severity", severityDebug),
+	)
+	if data != nil {
+		fields = append(fields, dataField("data", data))
+	}
+	logger.Log(zapcore.DebugLevel, msg, fields...)
+}
+
+// InfoContext logs an informational message and adds trace correlation fields
+// from ctx when it contains a valid OpenTelemetry SpanContext.
+func (l *Logger) InfoContext(ctx context.Context, traceID string, module string, msgType MsgType, msg string, data any) {
+	fields := getFields()
+	defer putFields(fields)
+
+	callerSkip := detectCallerSkip()
+
+	logger := l.logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(callerSkip))
+	fields = appendOTELFields(ctx, fields)
+	fields = append(fields,
+		zap.String("trace_id", traceID),
+		zap.String("module", module),
+		zap.String("msg_type", string(msgType)),
+		zap.String("severity", severityInfo),
+	)
+	if data != nil {
+		fields = append(fields, dataField("data", data))
+	}
+	logger.Log(zapcore.InfoLevel, msg, fields...)
+}
+
+// InfoContext logs through the global logger and adds trace correlation fields
+// using the tracing and output configuration established by New.
+func InfoContext(ctx context.Context, traceID string, module string, msgType MsgType, msg string, data any) {
+	fields := getFields()
+	defer putFields(fields)
+
+	callerSkip := detectCallerSkip()
+
+	logger := globalLog.Load().logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(callerSkip))
+	fields = appendOTELFields(ctx, fields)
+	fields = append(fields,
+		zap.String("trace_id", traceID),
+		zap.String("module", module),
+		zap.String("msg_type", string(msgType)),
+		zap.String("severity", severityInfo),
+	)
+	if data != nil {
+		fields = append(fields, dataField("data", data))
+	}
+	logger.Log(zapcore.InfoLevel, msg, fields...)
+}
+
+// WarningContext logs a warning message and adds trace correlation fields from
+// ctx when valid.
+func (l *Logger) WarningContext(ctx context.Context, traceID string, module string, msg string, data any) {
+	fields := getFields()
+	defer putFields(fields)
+
+	callerSkip := detectCallerSkip()
+
+	logger := l.logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(callerSkip))
+	fields = appendOTELFields(ctx, fields)
+	fields = append(fields,
+		zap.String("trace_id", traceID),
+		zap.String("module", module),
+		zap.String("severity", severityWarning),
+	)
+	if data != nil {
+		fields = append(fields, dataField("data", data))
+	}
+	logger.Log(zapcore.WarnLevel, msg, fields...)
+}
+
+// WarningContext logs through the global logger with trace correlation fields
+// from ctx when it contains a valid OpenTelemetry SpanContext.
+func WarningContext(ctx context.Context, traceID string, module string, msg string, data any) {
+	fields := getFields()
+	defer putFields(fields)
+
+	callerSkip := detectCallerSkip()
+
+	logger := globalLog.Load().logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(callerSkip))
+	fields = appendOTELFields(ctx, fields)
+	fields = append(fields,
+		zap.String("trace_id", traceID),
+		zap.String("module", module),
+		zap.String("severity", severityWarning),
+	)
+	if data != nil {
+		fields = append(fields, dataField("data", data))
+	}
+	logger.Log(zapcore.WarnLevel, msg, fields...)
+}
+
+// ErrorContext logs an error, adds trace correlation fields from ctx, and
+// records the error on the active span.
+func (l *Logger) ErrorContext(ctx context.Context, traceID string, module string, err error) {
+	fields := getFields()
+	defer putFields(fields)
+
+	callerSkip := detectCallerSkip()
+
+	logger := l.logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(callerSkip))
+	recordSpanError(ctx, err)
+	fields = appendOTELFields(ctx, fields)
+	fields = append(fields,
+		zap.String("trace_id", traceID),
+		zap.String("module", module),
+		zap.Error(err),
+		zap.String("severity", severityError),
+	)
+	logger.Log(zapcore.ErrorLevel, "error occurred", fields...)
+}
+
+// ErrorContext logs through the global logger, adds trace correlation fields
+// from ctx, and records the error on the active span.
+func ErrorContext(ctx context.Context, traceID string, module string, err error) {
+	fields := getFields()
+	defer putFields(fields)
+
+	callerSkip := detectCallerSkip()
+
+	logger := globalLog.Load().logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(callerSkip))
+	recordSpanError(ctx, err)
+	fields = appendOTELFields(ctx, fields)
+	fields = append(fields,
+		zap.String("trace_id", traceID),
+		zap.String("module", module),
+		zap.Error(err),
+		zap.String("severity", severityError),
+	)
+	logger.Log(zapcore.ErrorLevel, "error occurred", fields...)
+}
+
+// FatalContext logs a critical error, adds trace correlation fields from ctx,
+// records the error on the active span, and terminates the process.
+func (l *Logger) FatalContext(ctx context.Context, traceID string, module string, err error) {
+	fields := getFields()
+	defer putFields(fields)
+
+	callerSkip := detectCallerSkip()
+
+	logger := l.logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(callerSkip))
+	recordSpanError(ctx, err)
+	fields = appendOTELFields(ctx, fields)
+	fields = append(fields,
+		zap.String("trace_id", traceID),
+		zap.String("module", module),
+		zap.Error(err),
+		zap.String("severity", severityCritical),
+	)
+	logger.Log(zapcore.FatalLevel, "fatal error occurred", fields...)
+}
+
+// FatalContext logs through the global logger with trace correlation from a
+// valid OpenTelemetry SpanContext, then terminates the process.
+func FatalContext(ctx context.Context, traceID string, module string, err error) {
+	fields := getFields()
+	defer putFields(fields)
+
+	callerSkip := detectCallerSkip()
+
+	logger := globalLog.Load().logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(callerSkip))
+	recordSpanError(ctx, err)
+	fields = appendOTELFields(ctx, fields)
+	fields = append(fields,
+		zap.String("trace_id", traceID),
+		zap.String("module", module),
+		zap.Error(err),
+		zap.String("severity", severityCritical),
+	)
+	logger.Log(zapcore.FatalLevel, "fatal error occurred", fields...)
 }

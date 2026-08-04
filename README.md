@@ -31,7 +31,7 @@
   - Thread-safe singleton pattern with `sync.Once`
   - Compact single-line stack traces for better searchability
   - Cloud-native severity levels (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-  - **94%+ test coverage**
+  - **93%+ test coverage**
 
 ## 📦 Installation
 
@@ -84,11 +84,32 @@ dependencies are installed transitively with this library.
 
 Enable OTLP tracing once during application startup:
 
+`SamplingRatio` controls root-trace sampling from `0.0` to `1.0`. Its zero
+value uses `goslogx.DefaultSamplingRatio` (`1.0`) for backward-compatible
+default behavior. Sampling decisions received from a parent service are always
+honored.
+
 ```go
 logger := goslogx.New(
     goslogx.WithServiceName("payment-service"),
     goslogx.WithMasking(true),
-    goslogx.WithOTLPTracing("http://alloy:4317"),
+    goslogx.WithTracing(goslogx.TracingConfig{
+        Endpoint:      "alloy:4317",
+        SamplingRatio: 0.1,
+        Insecure:      true, // Use TLS for remote production gateways.
+        BatchTimeout:       5 * time.Second,
+        ExportTimeout:      5 * time.Second,
+        MaxQueueSize:       2048,
+        MaxExportBatchSize: 512,
+        ServiceVersion:        "1.4.2",
+        DeploymentEnvironment: "production",
+        ServiceInstanceID:     "payment-api-7c9f",
+        ResourceAttributes: map[string]string{
+            "team.name": "payments",
+        },
+        ErrorLogInterval: time.Minute,
+        // RegisterGlobal: false, // Opt in only when the app requires globals.
+    }),
 )
 
 if err := logger.TracingError(); err != nil {
@@ -104,6 +125,7 @@ defer func() {
 func HandlePayment(ctx context.Context) {
     logger.InfoContext(
         ctx,
+        "payment-123",
         "payment-handler",
         goslogx.MessageTypeEvent,
         "payment received",
@@ -114,19 +136,113 @@ func HandlePayment(ctx context.Context) {
 }
 ```
 
-When `InfoContext` or another context API receives a context without an active
-span, `goslogx` automatically creates and ends a short span for that log. The
-log therefore receives `trace_id`, `span_id`, and `trace_flags` without any
-application-level OpenTelemetry code:
+For a TLS-secured remote gateway with authentication:
 
 ```go
-goslogx.InfoContext(
-    context.Background(),
-    "payment-handler",
-    goslogx.MessageTypeEvent,
-    "payment received",
-    data,
+goslogx.WithTracing(goslogx.TracingConfig{
+    Endpoint:      "telemetry.example.com:4317",
+    SamplingRatio: 0.1,
+    TLSConfig: &tls.Config{
+        MinVersion: tls.VersionTLS12,
+        RootCAs:    customCAPool,
+    },
+    Headers: map[string]string{
+        "authorization": bearerToken,
+    },
+    Compression:   "gzip",
+    ExportTimeout: 5 * time.Second,
+    ServiceVersion:        "1.4.2",
+    DeploymentEnvironment: "production",
+    ServiceInstanceID:     "payment-api-7c9f",
+})
+```
+
+`Insecure` cannot be combined with `TLSConfig`. Use it only for a trusted
+local Collector. Header values are treated as credentials and are never
+included in configuration validation errors.
+
+Batch processing is asynchronous and non-blocking. Defaults are a 2,048-span
+queue, batches of up to 512 spans, a 5-second batch timeout, and a 30-second
+export timeout. When the queue is full, newly ended spans are dropped to avoid
+blocking application traffic. Monitor the Collector and tune queue capacity
+for the application's peak telemetry volume. `Shutdown` flushes spans that
+remain in the queue.
+
+Tracing requires `WithServiceName`, `ServiceVersion`,
+`DeploymentEnvironment`, and `ServiceInstanceID`. These values become the
+standard `service.*` and `deployment.environment.name` resource attributes.
+`ResourceAttributes` can add deployment metadata such as `team.name`; it cannot
+override the required service attributes. Default OpenTelemetry SDK resource
+attributes are preserved.
+
+The OTLP/gRPC exporter connects lazily when telemetry is first exported, so a
+successful `New` validates configuration but does not guarantee that the
+Collector is reachable. Export failures are written through the application
+logger and rate-limited by `ErrorLogInterval` (default: one minute).
+
+Use `ForceFlush` when telemetry must be sent before a lifecycle boundary:
+
+```go
+flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+
+if err := goslogx.ForceFlush(flushCtx); err != nil {
+    log.Printf("could not flush telemetry: %v", err)
+}
+```
+
+`Shutdown` is idempotent, flushes pending spans, and prevents new spans from
+being created by `StartTrace`. Calls to `ForceFlush` after shutdown return
+`goslogx.ErrTracingShutdown`. Always provide a shutdown context with a timeout.
+
+### Provider ownership
+
+`WithTracing` creates a provider owned by `goslogx`. By default it remains
+local and does not replace `otel.GetTracerProvider()`. Pass it explicitly to
+instrumentation libraries:
+
+```go
+handler := otelhttp.NewHandler(
+    router,
+    "payment-api",
+    otelhttp.WithTracerProvider(logger.TracerProvider()),
+    otelhttp.WithPropagators(goslogx.TextMapPropagator()),
 )
+```
+
+Set `RegisterGlobal: true` only when the application explicitly wants the
+managed provider installed globally. `Shutdown` closes that managed provider
+and restores the previous global provider and propagator.
+
+When the application already owns an SDK, use its provider instead:
+
+```go
+logger := goslogx.New(
+    goslogx.WithServiceName("payment-api"),
+    goslogx.WithTracerProvider(existingProvider),
+)
+```
+
+An external provider is used for `StartTrace` and log correlation, but is never
+registered, flushed, or shut down by `goslogx`. Combining `WithTracing` and
+`WithTracerProvider` is rejected through `TracingError` because ownership would
+be ambiguous.
+
+For Go eBPF/zero-code instrumentation, use `WithTracerProvider` with the
+provider selected by the application or agent, and do not enable
+`RegisterGlobal`. The OpenTelemetry Auto SDK relies on its global provider;
+replacing it manually breaks correlation with eBPF-created spans.
+
+When `InfoContext` or another context API receives a context without an active
+span, the log is written normally without trace correlation fields. Logging
+does not create orphan spans. Start an operation span explicitly when trace
+correlation is required:
+
+```go
+ctx, endTrace := goslogx.StartTrace(context.Background(), "process-payment")
+defer endTrace()
+
+goslogx.InfoContext(ctx, "payment-123", "payment-handler", goslogx.MessageTypeEvent, "payment received", data)
 ```
 
 To group multiple logs into one trace, use the library-level lifecycle helper:
@@ -135,12 +251,86 @@ To group multiple logs into one trace, use the library-level lifecycle helper:
 ctx, endTrace := goslogx.StartTrace(ctx, "process-payment")
 defer endTrace()
 
-goslogx.InfoContext(ctx, "payment", goslogx.MessageTypeEvent, "payment started", nil)
-goslogx.WarningContext(ctx, "payment", "provider response was slow", nil)
-goslogx.ErrorContext(ctx, "payment", err)
+goslogx.InfoContext(ctx, "payment-123", "payment", goslogx.MessageTypeEvent, "payment started", nil)
+goslogx.WarningContext(ctx, "payment-123", "payment", "provider response was slow", nil)
+goslogx.ErrorContext(ctx, "payment-123", "payment", err)
 ```
 
-For cross-service HTTP propagation, the application still only calls `goslogx`:
+### Instrumentation boundaries
+
+Use the official OpenTelemetry instrumentation at network boundaries. It
+creates server/client spans and propagates W3C `traceparent` automatically;
+`goslogx` only correlates application logs with the active span.
+
+HTTP server and client:
+
+```go
+handler := otelhttp.NewHandler(
+    router,
+    "payment-api",
+    otelhttp.WithTracerProvider(logger.TracerProvider()),
+    otelhttp.WithPropagators(goslogx.TextMapPropagator()),
+)
+
+client := &http.Client{
+    Transport: otelhttp.NewTransport(
+        http.DefaultTransport,
+        otelhttp.WithTracerProvider(logger.TracerProvider()),
+        otelhttp.WithPropagators(goslogx.TextMapPropagator()),
+    ),
+}
+
+// r.Context() contains the inbound server span.
+goslogx.InfoContext(r.Context(), "payment-123", "payment-api", goslogx.MessageTypeEvent, "request received", nil)
+
+// Preserve the context so the outbound client span is a child of the server span.
+req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, inventoryURL, nil)
+```
+
+gRPC server and client use stats handlers:
+
+```go
+server := grpc.NewServer(
+    grpc.StatsHandler(otelgrpc.NewServerHandler(
+        otelgrpc.WithTracerProvider(logger.TracerProvider()),
+        otelgrpc.WithPropagators(goslogx.TextMapPropagator()),
+    )),
+)
+
+conn, err := grpc.NewClient(
+    target,
+    grpc.WithTransportCredentials(credentials),
+    grpc.WithStatsHandler(otelgrpc.NewClientHandler(
+        otelgrpc.WithTracerProvider(logger.TracerProvider()),
+        otelgrpc.WithPropagators(goslogx.TextMapPropagator()),
+    )),
+)
+```
+
+Always pass the RPC context into logs and downstream operations. For a
+goroutine, pass the context explicitly instead of replacing it with
+`context.Background()`:
+
+```go
+go func(ctx context.Context) {
+    goslogx.InfoContext(ctx, "payment-123", "worker", goslogx.MessageTypeEvent, "processing", nil)
+}(r.Context())
+```
+
+Only launch work with the request context when it must be cancelled with the
+request. For detached work, create an explicit background-job span and define
+its timeout/lifecycle; do not retain a request context indefinitely.
+
+For databases, Redis, and message brokers, select an instrumentation library
+for the exact driver being used and pass the active context to every call
+(`QueryContext`, `ExecContext`, Redis command context, and publish/consume
+context). Broker producers must inject trace context into message headers and
+consumers must extract those headers before creating a consumer span. Verify
+the package in the OpenTelemetry registry because support and semantic
+conventions differ by driver.
+
+The low-level helpers remain available for custom protocols or libraries that
+do not provide instrumentation:
 
 ```go
 // Incoming request
@@ -152,14 +342,8 @@ defer endTrace()
 goslogx.InjectHTTPContext(ctx, outboundRequest.Header)
 ```
 
-For local correlation without any network exporter, use:
-
-```go
-goslogx.New(
-    goslogx.WithServiceName("payment-service"),
-    goslogx.WithTracing(),
-)
-```
+Do not combine these helpers with `otelhttp` for the same HTTP boundary;
+`otelhttp` already extracts and injects propagation headers.
 
 The package-level `DebugContext`, `InfoContext`, `WarningContext`,
 `ErrorContext`, `FatalContext`, `StartTrace`, `Shutdown`, and `TracingError`
@@ -173,9 +357,9 @@ A traced log produces output like:
   "time": "2026-07-29T16:00:00+07:00",
   "msg": "payment received",
   "application_name": "payment-service",
-  "trace_id": "c157bd358d20626a78eb4182fb353753",
-  "span_id": "6e642e0aa213d5ab",
-  "trace_flags": "01",
+  "obs_trace_id": "c157bd358d20626a78eb4182fb353753",
+  "obs_span_id": "6e642e0aa213d5ab",
+  "obs_trace_flags": "01",
   "module": "payment-handler",
   "msg_type": "EVENT",
   "severity": "INFO",
@@ -202,7 +386,17 @@ goslogx OpenTelemetry Trace SDK
     → Tempo
 ```
 
-This allows a Loki `trace_id` to link to its Tempo trace. Avoid enabling both
+### Production Collector reference
+
+A deployable Collector pipeline is available in
+[`otel-collector.yaml`](otel-collector.yaml), with operational guidance and
+Docker Compose/Kubernetes examples under
+[`deployments/otel-collector`](deployments/otel-collector/README.md). It
+includes memory limiting, resource enrichment, batching, exporter retry, a
+persistent sending queue, health checks, internal Prometheus metrics, optional
+tail-sampling policies, and TLS/authentication examples.
+
+This allows a Loki `obs_trace_id` to link to its Tempo trace. Avoid enabling both
 `stdout → Alloy → Loki` and `OTLP logs → Alloy → Loki` for the same log stream,
 as that would duplicate entries. `goslogx` sends traces—not logs—through OTLP;
 logs continue to use only the stdout/writer path. A runnable example requiring
@@ -379,11 +573,24 @@ OpenTelemetry correlation benchmarks (`Apple M1 Pro`, Go 1.24):
 | `InfoContextWithSpan` | 4,123 ns | 16 | 1,267 B |
 | `InfoContextWithoutSpan` | 3,438 ns | 13 | 1,211 B |
 | `ErrorContextWithSpan` | 3,706 ns | 16 | 1,267 B |
-| `InfoContextAutoSpan` | 4,273 ns | 19 | 1,821 B |
+
+Tracing lifecycle benchmarks (`Intel Core i5-12400F`, Linux amd64, Go 1.25
+toolchain building the Go 1.24 module; median of three runs):
+
+| Benchmark | Time/op | Allocs/op | Bytes/op |
+|-----------|---------|-----------|----------|
+| `StartTraceDisabled` | 2.2 ns | 0 | 0 B |
+| `StartTraceEnabledSampled` | 726 ns | 3 | 552 B |
+| `StartTraceEnabledUnsampled` | 283 ns | 3 | 168 B |
+| `InfoContextWithoutSpanTracingEnabled` | 4,481 ns | 12 | 1,196 B |
 
 The context APIs perform SpanContext extraction and caller detection in
 addition to regular JSON encoding. Run `go test -bench='Context' -benchmem
 ./...` on your deployment platform for representative results.
+
+Release targets, span-loss tolerance, and the operational checklist are in
+[`PRODUCTION_READINESS.md`](PRODUCTION_READINESS.md). Evaluate performance on
+comparable, quiet hardware rather than with timing-sensitive unit assertions.
 
 ### JSON Masking Performance
 
@@ -463,6 +670,13 @@ Full API documentation is available at [pkg.go.dev](https://pkg.go.dev/github.co
 # Run tests
 go test ./...
 
+# Final release gates
+go test -race ./...
+go vet ./...
+
+# Run only the in-process OTLP/gRPC end-to-end pipeline tests
+go test -run 'TestOTLPExport(EndToEnd|Failures)$' ./...
+
 # Run tests with coverage
 go test -cover ./...
 
@@ -471,7 +685,16 @@ go test -coverprofile=coverage.out ./...
 go tool cover -html=coverage.out
 ```
 
-**Current Coverage:** 94.1%
+The OTLP integration suite starts a real gRPC receiver on an ephemeral
+`127.0.0.1` port. It requires permission to bind a loopback socket, but does
+not require Docker or an external Collector.
+
+For upgrades from `WithTracing()`, `WithOTLPTracing(string)`, or the
+intermediate `WithTracing(string)` API, see [`MIGRATION.md`](MIGRATION.md).
+The complete HTTP instrumentation and graceful-shutdown example is available
+at [`examples/otel_trace_correlation`](examples/otel_trace_correlation/main.go).
+
+**Current Coverage:** 93.5%
 
 ## 🤝 Contributing
 
