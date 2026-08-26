@@ -203,7 +203,7 @@ func TestShutdownLifecycle(t *testing.T) {
 func TestOTelExportErrorsAreRateLimited(t *testing.T) {
 	var output lockedBuffer
 	logger := setupLog(WithOutput(&output))
-	handler := newRateLimitedOTelErrorHandler(logger.logger, time.Hour)
+	handler := newRateLimitedOTelErrorHandler(logger.logger, time.Hour, nil)
 	previousHandler := otel.GetErrorHandler()
 	otel.SetErrorHandler(handler)
 	t.Cleanup(func() { otel.SetErrorHandler(previousHandler) })

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/metric/noop"
 	"go.uber.org/zap/zapcore"
 )
 
@@ -76,6 +77,23 @@ func TestOptions(t *testing.T) {
 			t.Errorf("SamplingRatio = %v", cfg.Tracing.SamplingRatio)
 		}
 	})
+
+	t.Run("WithMeterProvider", func(t *testing.T) {
+		cfg := defaultConfig()
+		provider := noop.NewMeterProvider()
+		WithMeterProvider(provider)(cfg)
+		if cfg.MeterProvider != provider {
+			t.Fatal("MeterProvider was not stored")
+		}
+	})
+
+	t.Run("WithInternalMetrics", func(t *testing.T) {
+		cfg := defaultConfig()
+		WithInternalMetrics(true)(cfg)
+		if !cfg.InternalMetrics {
+			t.Fatal("InternalMetrics was not enabled")
+		}
+	})
 }
 
 func TestDefaultConfig(t *testing.T) {
@@ -91,6 +109,9 @@ func TestDefaultConfig(t *testing.T) {
 	}
 	if !cfg.Masking.Enabled {
 		t.Error("Expected default Masking.Enabled to be true")
+	}
+	if cfg.InternalMetrics {
+		t.Error("Expected internal metrics to be disabled by default")
 	}
 }
 

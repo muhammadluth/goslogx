@@ -233,6 +233,112 @@ provider selected by the application or agent, and do not enable
 `RegisterGlobal`. The OpenTelemetry Auto SDK relies on its global provider;
 replacing it manually breaks correlation with eBPF-created spans.
 
+### Metrics ownership
+
+`WithMeterProvider` accepts a `MeterProvider` owned by the application. It is
+never registered globally, flushed, or shut down by `goslogx`. When no provider
+is supplied (including `WithMeterProvider(nil)`), `goslogx` uses a no-op
+provider. This keeps metrics disabled without consulting or changing
+`otel.GetMeterProvider()`.
+
+```text
+TracerProvider managed:
+  lifecycle can be owned by goslogx
+TracerProvider external:
+  lifecycle is owned by the application
+MeterProvider external:
+  lifecycle is always owned by the application
+```
+
+The application must call `ForceFlush` and `Shutdown` on its own metrics SDK
+during application shutdown. Because `goslogx` leaves the global
+`MeterProvider` untouched, it can coexist with the provider installed by the
+OpenTelemetry Auto SDK or other automatic instrumentation.
+
+Internal logger metrics are opt-in and use the injected provider:
+
+```go
+logger := goslogx.New(
+    goslogx.WithServiceName("payment-api"),
+    goslogx.WithMeterProvider(meterProvider),
+    goslogx.WithInternalMetrics(true),
+)
+```
+
+The following instruments describe `goslogx` itself, not application business
+activity:
+
+```text
+goslogx.log.records
+goslogx.telemetry.errors
+goslogx.telemetry.force_flush.duration
+goslogx.telemetry.force_flush.errors
+goslogx.telemetry.shutdown.duration
+goslogx.telemetry.shutdown.errors
+```
+
+Only the bounded attributes `severity`, `operation`, and `result` are emitted.
+Trace IDs, span IDs, request or user IDs, messages, modules, URLs, and error
+text are never used as metric attributes. This prevents sensitive data leakage
+and unbounded metric cardinality.
+
+The initial internal-metrics performance budget is zero additional allocation
+when disabled, and no more than 250 ns/op plus one allocation per log when
+enabled (measured as the enabled-minus-disabled delta on the same machine).
+Run the focused benchmarks several times and compare the paired results:
+
+```bash
+go test -run '^$' -bench='(Info|Error)ContextMetrics|InternalMetric' \
+  -benchmem -count=5
+```
+
+For the complete ownership matrix, Collector/backend choices, cardinality
+rules, graceful shutdown order, and release checklist, see
+[`docs/observability-production.md`](docs/observability-production.md).
+
+### Application HTTP RED metrics
+
+Application metrics stay in the application. A copy-and-adapt HTTP middleware
+reference is available in [`examples/otel_metrics`](examples/otel_metrics). It
+uses the injected provider through `logger.MeterProvider()` and records:
+
+```text
+http.server.requests
+http.server.errors       # server errors (HTTP 5xx)
+http.server.duration     # seconds
+payment.events           # example bounded business event
+```
+
+Provide the route template from the router after route matching, for example
+`/payments/{id}`. Never substitute it with `r.URL.Path`, which could become
+`/payments/pay-123` and create an unbounded number of metric series. The
+middleware records with `r.Context()`, allowing a supporting metrics SDK to
+attach a sampled active span as an exemplar. Business events use a fixed event
+name (`payment.created`); do not attach a payment ID as a metric attribute.
+
+### Database pool and NATS consumer metrics
+
+A copy-and-adapt reference is available in
+[`examples/otel_db_nats_metrics`](examples/otel_db_nats_metrics). The database
+observer receives an application-owned `*sql.DB` and polls `db.Stats()`; it is
+not stored in `goslogx`. It records open, in-use, idle, wait-count, and
+wait-duration pool metrics. The wait counters are converted from cumulative
+`sql.DBStats` values to deltas, so repeated polling does not overcount them.
+
+The NATS reference receives a neutral `NATSConsumerSnapshot` from application
+code rather than importing a NATS client. It records pending, ack-pending,
+redelivered, lag, publish/consume count, and operation duration metrics using
+only these low-cardinality attributes:
+
+```text
+messaging.system=nats
+messaging.destination.name=payments
+messaging.consumer.name=payment-worker
+```
+
+Do not use a message ID, payload, subject with generated identifiers, or raw
+error text as a metric attribute.
+
 When `InfoContext` or another context API receives a context without an active
 span, the log is written normally without trace correlation fields. Logging
 does not create orphan spans. Start an operation span explicitly when trace
@@ -402,6 +508,20 @@ as that would duplicate entries. `goslogx` sends traces—not logs—through OTL
 logs continue to use only the stdout/writer path. A runnable example requiring
 no application-level OpenTelemetry import is available at
 [`examples/otel_trace_correlation`](examples/otel_trace_correlation).
+
+### Runtime and infrastructure metrics
+
+CPU, memory, and network traffic are not logger metrics. The source must match
+the resource being measured: instrument the Go runtime for heap/GC/goroutines;
+use cAdvisor or kubelet for container CPU, memory, and network; and use node
+exporter or Collector `hostmetrics` for host-level signals. Collector CPU,
+memory, and exporter queue health come from its internal telemetry; log
+records/bytes come from the Loki/Alloy pipeline.
+
+Use a metrics backend such as Prometheus, Mimir, or an OTLP metrics service.
+Tempo receives traces only. The separate
+[`otel-collector-metrics.yaml`](otel-collector-metrics.yaml) template wires
+application OTLP metrics and Collector host metrics to that metrics backend.
 
 ### HTTP Request/Response Logging with Auto-Masking
 
@@ -674,8 +794,8 @@ go test ./...
 go test -race ./...
 go vet ./...
 
-# Run only the in-process OTLP/gRPC end-to-end pipeline tests
-go test -run 'TestOTLPExport(EndToEnd|Failures)$' ./...
+# Run only the in-process OTLP/gRPC trace and metrics pipeline tests
+go test -run 'TestOTLP(Export|Metrics)' ./...
 
 # Run tests with coverage
 go test -cover ./...
@@ -685,9 +805,10 @@ go test -coverprofile=coverage.out ./...
 go tool cover -html=coverage.out
 ```
 
-The OTLP integration suite starts a real gRPC receiver on an ephemeral
-`127.0.0.1` port. It requires permission to bind a loopback socket, but does
-not require Docker or an external Collector.
+The OTLP integration suites start real trace and metrics gRPC receivers on
+ephemeral `127.0.0.1` ports. They verify OTLP payloads, failure handling, and
+application-owned metrics lifecycle without Docker or an external Collector.
+The tests require permission to bind loopback sockets.
 
 For upgrades from `WithTracing()`, `WithOTLPTracing(string)`, or the
 intermediate `WithTracing(string)` API, see [`MIGRATION.md`](MIGRATION.md).

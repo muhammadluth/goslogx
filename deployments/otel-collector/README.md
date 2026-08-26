@@ -13,6 +13,38 @@ Prometheus internal metrics, retry, and a disk-backed exporter queue. Tail
 sampling policies are included but intentionally omitted from the active
 pipeline.
 
+## Runtime and infrastructure metrics
+
+`goslogx` does not collect CPU, memory, or network metrics. Those signals need
+to come from the layer that owns the resource:
+
+| Signal | Correct source |
+| --- | --- |
+| Go heap, GC, goroutines | Go runtime instrumentation in the application metrics SDK |
+| Container CPU/memory and network | cAdvisor or kubelet |
+| Host CPU/memory and network | node exporter or the Collector `hostmetrics` receiver |
+| Collector CPU/memory and queue | Collector internal telemetry on port `8888` |
+| Log records and bytes | Loki/Alloy pipeline metrics |
+
+[`otel-collector-metrics.yaml`](../../otel-collector-metrics.yaml) is a
+separate Contrib Collector template for host metrics and application OTLP
+metrics. It has separate `traces` and `metrics` pipelines; the metrics pipeline
+uses both `otlp` and `hostmetrics` receivers. Set
+`OTLP_TRACE_BACKEND_ENDPOINT`/`OTLP_TRACE_BACKEND_INSECURE` for Tempo or
+another trace backend, and `OTLP_METRICS_BACKEND_ENDPOINT`/
+`OTLP_METRICS_BACKEND_INSECURE` for an OTLP-capable metrics backend.
+
+Deploy `hostmetrics` as a per-node agent (normally a Kubernetes DaemonSet),
+mount the host filesystem at `/hostfs`, and collect it once per node. Do not
+add it to the trace gateway StatefulSet: every replica would report the same
+host metrics. `hostmetrics` reports host-level signals, not per-container
+usage; use cAdvisor or kubelet for the latter.
+
+Send metrics to Prometheus, Mimir, or another metrics backend. Tempo remains
+the trace backend, so it must not be used as the metrics exporter target.
+Collector-internal metrics are exposed separately on port `8888`; scrape them
+to alert on CPU, memory, exporter failures, and queue growth.
+
 ## Local Docker Compose
 
 Run the Collector and a development Tempo backend:
@@ -79,4 +111,3 @@ Replace the cluster name, backend endpoint, storage class, resource sizing,
 and insecure backend transport before production. The example has one replica
 because a disk-backed queue and tail-aware horizontal scaling require an
 explicit sharding and storage design.
-

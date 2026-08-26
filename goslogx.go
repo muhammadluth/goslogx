@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
@@ -50,6 +52,8 @@ type Logger struct {
 	tracer              trace.Tracer
 	tracerProvider      *sdktrace.TracerProvider
 	configuredProvider  trace.TracerProvider
+	meterProvider       metric.MeterProvider
+	internalMetrics     *internalMetrics
 	tracingErr          error
 	tracingClosed       atomic.Bool
 	shutdownOnce        sync.Once
@@ -270,8 +274,15 @@ func setupLog(opts ...Option) *Logger {
 	).With(zap.String("application_name", cfg.ServiceName))
 
 	result := &Logger{
-		logger: logger,
-		config: cfg,
+		logger:        logger,
+		config:        cfg,
+		meterProvider: cfg.MeterProvider,
+	}
+	if result.meterProvider == nil {
+		result.meterProvider = noop.NewMeterProvider()
+	}
+	if cfg.InternalMetrics {
+		result.internalMetrics = newInternalMetrics(result.meterProvider)
 	}
 	result.tracer, result.tracerProvider, result.tracingErr = setupTracing(cfg)
 	if result.tracingErr == nil && cfg.TracerProvider != nil {
@@ -288,10 +299,25 @@ func setupLog(opts ...Option) *Logger {
 	}
 	if result.tracerProvider != nil {
 		result.previousOTelHandler = otel.GetErrorHandler()
-		result.otelHandler = newRateLimitedOTelErrorHandler(result.logger, cfg.Tracing.ErrorLogInterval)
+		result.otelHandler = newRateLimitedOTelErrorHandler(result.logger, cfg.Tracing.ErrorLogInterval, result.internalMetrics)
 		otel.SetErrorHandler(result.otelHandler)
 	}
 	return result
+}
+
+// MeterProvider returns the application-owned provider configured for this
+// logger. When no provider was configured, it returns a no-op provider.
+func (l *Logger) MeterProvider() metric.MeterProvider {
+	if l == nil || l.meterProvider == nil {
+		return noop.NewMeterProvider()
+	}
+	return l.meterProvider
+}
+
+// MeterProvider returns the provider configured on the global logger. It never
+// reads or changes the OpenTelemetry global MeterProvider.
+func MeterProvider() metric.MeterProvider {
+	return globalLog.Load().MeterProvider()
 }
 
 // Severity level constants for Cloud Logging compatibility.
@@ -358,6 +384,7 @@ func (l *Logger) Fatal(traceID string, module string, err error) {
 		zap.String("severity", severityCritical),
 	)
 
+	l.recordLogMetric(context.Background(), severityCritical, zapcore.FatalLevel)
 	logger.Log(zapcore.FatalLevel, "fatal error occurred", fields...)
 }
 
@@ -368,7 +395,8 @@ func Fatal(traceID string, module string, err error) {
 
 	callerSkip := detectCallerSkip()
 
-	logger := globalLog.Load().logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(callerSkip))
+	global := globalLog.Load()
+	logger := global.logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(callerSkip))
 	fields = append(fields,
 		zap.String("trace_id", traceID),
 		zap.String("module", module),
@@ -376,6 +404,7 @@ func Fatal(traceID string, module string, err error) {
 		zap.String("severity", severityCritical),
 	)
 
+	global.recordLogMetric(context.Background(), severityCritical, zapcore.FatalLevel)
 	logger.Log(zapcore.FatalLevel, "fatal error occurred", fields...)
 }
 
@@ -394,6 +423,7 @@ func (l *Logger) Error(traceID string, module string, err error) {
 		zap.String("severity", severityError),
 	)
 	logger.Log(zapcore.ErrorLevel, "error occurred", fields...)
+	l.recordLogMetric(context.Background(), severityError, zapcore.ErrorLevel)
 }
 
 // Error logs an error event using the global logger with automatic stack trace capture.
@@ -403,7 +433,8 @@ func Error(traceID string, module string, err error) {
 
 	callerSkip := detectCallerSkip()
 
-	logger := globalLog.Load().logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(callerSkip))
+	global := globalLog.Load()
+	logger := global.logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(callerSkip))
 	fields = append(fields,
 		zap.String("trace_id", traceID),
 		zap.String("module", module),
@@ -411,6 +442,7 @@ func Error(traceID string, module string, err error) {
 		zap.String("severity", severityError),
 	)
 	logger.Log(zapcore.ErrorLevel, "error occurred", fields...)
+	global.recordLogMetric(context.Background(), severityError, zapcore.ErrorLevel)
 }
 
 // Warning logs a warning-level message with optional context data.
@@ -430,6 +462,7 @@ func (l *Logger) Warning(traceID string, module string, msg string, data any) {
 		fields = append(fields, zap.Any("data", data))
 	}
 	logger.Log(zapcore.WarnLevel, msg, fields...)
+	l.recordLogMetric(context.Background(), severityWarning, zapcore.WarnLevel)
 }
 
 // Warning logs a warning-level message using the global logger with optional context data.
@@ -439,7 +472,8 @@ func Warning(traceID string, module string, msg string, data any) {
 
 	callerSkip := detectCallerSkip()
 
-	logger := globalLog.Load().logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(callerSkip))
+	global := globalLog.Load()
+	logger := global.logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(callerSkip))
 	fields = append(fields,
 		zap.String("trace_id", traceID),
 		zap.String("module", module),
@@ -449,6 +483,7 @@ func Warning(traceID string, module string, msg string, data any) {
 		fields = append(fields, zap.Any("data", data))
 	}
 	logger.Log(zapcore.WarnLevel, msg, fields...)
+	global.recordLogMetric(context.Background(), severityWarning, zapcore.WarnLevel)
 }
 
 // Info logs an informational message with a specified message type.
@@ -466,6 +501,7 @@ func (l *Logger) Info(traceID string, module string, msgType MsgType, msg string
 		fields = append(fields, dataField("data", data))
 	}
 	l.logger.Log(zapcore.InfoLevel, msg, fields...)
+	l.recordLogMetric(context.Background(), severityInfo, zapcore.InfoLevel)
 }
 
 // Info logs an informational message using the global logger with a specified message type.
@@ -482,7 +518,9 @@ func Info(traceID string, module string, msgType MsgType, msg string, data any) 
 	if data != nil {
 		fields = append(fields, dataField("data", data))
 	}
-	globalLog.Load().logger.Log(zapcore.InfoLevel, msg, fields...)
+	global := globalLog.Load()
+	global.logger.Log(zapcore.InfoLevel, msg, fields...)
+	global.recordLogMetric(context.Background(), severityInfo, zapcore.InfoLevel)
 }
 
 // Debug logs a debug-level message with a specified message type.
@@ -503,6 +541,7 @@ func (l *Logger) Debug(traceID string, module string, msgType MsgType, msg strin
 		fields = append(fields, zap.Any("data", data))
 	}
 	logger.Log(zapcore.DebugLevel, msg, fields...)
+	l.recordLogMetric(context.Background(), severityDebug, zapcore.DebugLevel)
 }
 
 // Debug logs a debug-level message using the global logger with a specified message type.
@@ -512,7 +551,8 @@ func Debug(traceID string, module string, msgType MsgType, msg string, data any)
 
 	callerSkip := detectCallerSkip()
 
-	logger := globalLog.Load().logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(callerSkip))
+	global := globalLog.Load()
+	logger := global.logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(callerSkip))
 	fields = append(fields,
 		zap.String("trace_id", traceID),
 		zap.String("module", module),
@@ -523,6 +563,7 @@ func Debug(traceID string, module string, msgType MsgType, msg string, data any)
 		fields = append(fields, zap.Any("data", data))
 	}
 	logger.Log(zapcore.DebugLevel, msg, fields...)
+	global.recordLogMetric(context.Background(), severityDebug, zapcore.DebugLevel)
 }
 
 // DebugContext logs a debug message and adds trace correlation fields from ctx
@@ -545,6 +586,7 @@ func (l *Logger) DebugContext(ctx context.Context, traceID string, module string
 		fields = append(fields, dataField("data", data))
 	}
 	logger.Log(zapcore.DebugLevel, msg, fields...)
+	l.recordLogMetric(ctx, severityDebug, zapcore.DebugLevel)
 }
 
 // DebugContext logs through the global logger and adds trace correlation fields
@@ -555,7 +597,8 @@ func DebugContext(ctx context.Context, traceID string, module string, msgType Ms
 
 	callerSkip := detectCallerSkip()
 
-	logger := globalLog.Load().logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(callerSkip))
+	global := globalLog.Load()
+	logger := global.logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(callerSkip))
 	fields = appendOTELFields(ctx, fields)
 	fields = append(fields,
 		zap.String("trace_id", traceID),
@@ -567,6 +610,7 @@ func DebugContext(ctx context.Context, traceID string, module string, msgType Ms
 		fields = append(fields, dataField("data", data))
 	}
 	logger.Log(zapcore.DebugLevel, msg, fields...)
+	global.recordLogMetric(ctx, severityDebug, zapcore.DebugLevel)
 }
 
 // InfoContext logs an informational message and adds trace correlation fields
@@ -589,6 +633,7 @@ func (l *Logger) InfoContext(ctx context.Context, traceID string, module string,
 		fields = append(fields, dataField("data", data))
 	}
 	logger.Log(zapcore.InfoLevel, msg, fields...)
+	l.recordLogMetric(ctx, severityInfo, zapcore.InfoLevel)
 }
 
 // InfoContext logs through the global logger and adds trace correlation fields
@@ -599,7 +644,8 @@ func InfoContext(ctx context.Context, traceID string, module string, msgType Msg
 
 	callerSkip := detectCallerSkip()
 
-	logger := globalLog.Load().logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(callerSkip))
+	global := globalLog.Load()
+	logger := global.logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(callerSkip))
 	fields = appendOTELFields(ctx, fields)
 	fields = append(fields,
 		zap.String("trace_id", traceID),
@@ -611,6 +657,7 @@ func InfoContext(ctx context.Context, traceID string, module string, msgType Msg
 		fields = append(fields, dataField("data", data))
 	}
 	logger.Log(zapcore.InfoLevel, msg, fields...)
+	global.recordLogMetric(ctx, severityInfo, zapcore.InfoLevel)
 }
 
 // WarningContext logs a warning message and adds trace correlation fields from
@@ -632,6 +679,7 @@ func (l *Logger) WarningContext(ctx context.Context, traceID string, module stri
 		fields = append(fields, dataField("data", data))
 	}
 	logger.Log(zapcore.WarnLevel, msg, fields...)
+	l.recordLogMetric(ctx, severityWarning, zapcore.WarnLevel)
 }
 
 // WarningContext logs through the global logger with trace correlation fields
@@ -642,7 +690,8 @@ func WarningContext(ctx context.Context, traceID string, module string, msg stri
 
 	callerSkip := detectCallerSkip()
 
-	logger := globalLog.Load().logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(callerSkip))
+	global := globalLog.Load()
+	logger := global.logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(callerSkip))
 	fields = appendOTELFields(ctx, fields)
 	fields = append(fields,
 		zap.String("trace_id", traceID),
@@ -653,6 +702,7 @@ func WarningContext(ctx context.Context, traceID string, module string, msg stri
 		fields = append(fields, dataField("data", data))
 	}
 	logger.Log(zapcore.WarnLevel, msg, fields...)
+	global.recordLogMetric(ctx, severityWarning, zapcore.WarnLevel)
 }
 
 // ErrorContext logs an error, adds trace correlation fields from ctx, and
@@ -673,6 +723,7 @@ func (l *Logger) ErrorContext(ctx context.Context, traceID string, module string
 		zap.String("severity", severityError),
 	)
 	logger.Log(zapcore.ErrorLevel, "error occurred", fields...)
+	l.recordLogMetric(ctx, severityError, zapcore.ErrorLevel)
 }
 
 // ErrorContext logs through the global logger, adds trace correlation fields
@@ -683,7 +734,8 @@ func ErrorContext(ctx context.Context, traceID string, module string, err error)
 
 	callerSkip := detectCallerSkip()
 
-	logger := globalLog.Load().logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(callerSkip))
+	global := globalLog.Load()
+	logger := global.logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(callerSkip))
 	recordSpanError(ctx, err)
 	fields = appendOTELFields(ctx, fields)
 	fields = append(fields,
@@ -693,6 +745,7 @@ func ErrorContext(ctx context.Context, traceID string, module string, err error)
 		zap.String("severity", severityError),
 	)
 	logger.Log(zapcore.ErrorLevel, "error occurred", fields...)
+	global.recordLogMetric(ctx, severityError, zapcore.ErrorLevel)
 }
 
 // FatalContext logs a critical error, adds trace correlation fields from ctx,
@@ -712,6 +765,7 @@ func (l *Logger) FatalContext(ctx context.Context, traceID string, module string
 		zap.Error(err),
 		zap.String("severity", severityCritical),
 	)
+	l.recordLogMetric(ctx, severityCritical, zapcore.FatalLevel)
 	logger.Log(zapcore.FatalLevel, "fatal error occurred", fields...)
 }
 
@@ -723,7 +777,8 @@ func FatalContext(ctx context.Context, traceID string, module string, err error)
 
 	callerSkip := detectCallerSkip()
 
-	logger := globalLog.Load().logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(callerSkip))
+	global := globalLog.Load()
+	logger := global.logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(callerSkip))
 	recordSpanError(ctx, err)
 	fields = appendOTELFields(ctx, fields)
 	fields = append(fields,
@@ -732,5 +787,6 @@ func FatalContext(ctx context.Context, traceID string, module string, err error)
 		zap.Error(err),
 		zap.String("severity", severityCritical),
 	)
+	global.recordLogMetric(ctx, severityCritical, zapcore.FatalLevel)
 	logger.Log(zapcore.FatalLevel, "fatal error occurred", fields...)
 }

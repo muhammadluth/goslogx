@@ -56,11 +56,12 @@ type batchProcessorConfig struct {
 }
 
 type rateLimitedOTelErrorHandler struct {
-	logger     *zap.Logger
-	interval   time.Duration
-	mu         sync.Mutex
-	lastLogged time.Time
-	suppressed uint64
+	logger          *zap.Logger
+	internalMetrics *internalMetrics
+	interval        time.Duration
+	mu              sync.Mutex
+	lastLogged      time.Time
+	suppressed      uint64
 }
 
 var reservedResourceAttributeKeys = map[string]struct{}{
@@ -196,17 +197,22 @@ func newTraceSampler(cfg TracingConfig) sdktrace.Sampler {
 	return sdktrace.ParentBased(sdktrace.TraceIDRatioBased(ratio))
 }
 
-func newRateLimitedOTelErrorHandler(logger *zap.Logger, interval time.Duration) *rateLimitedOTelErrorHandler {
+func newRateLimitedOTelErrorHandler(logger *zap.Logger, interval time.Duration, internalMetrics *internalMetrics) *rateLimitedOTelErrorHandler {
 	if interval == 0 {
 		interval = DefaultOTelErrorLogInterval
 	}
-	return &rateLimitedOTelErrorHandler{logger: logger, interval: interval}
+	return &rateLimitedOTelErrorHandler{
+		logger:          logger,
+		internalMetrics: internalMetrics,
+		interval:        interval,
+	}
 }
 
 func (h *rateLimitedOTelErrorHandler) Handle(err error) {
 	if h == nil || h.logger == nil || err == nil {
 		return
 	}
+	h.internalMetrics.recordTelemetryError(context.Background())
 
 	h.mu.Lock()
 	now := time.Now()
@@ -424,15 +430,23 @@ func StartTrace(ctx context.Context, name string) (context.Context, func()) {
 }
 
 // ForceFlush exports all ended spans queued by the logger-owned TracerProvider.
-func (l *Logger) ForceFlush(ctx context.Context) error {
-	if l == nil || l.tracerProvider == nil {
+func (l *Logger) ForceFlush(ctx context.Context) (err error) {
+	if l == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	started := time.Now()
+	defer func() {
+		l.internalMetrics.recordForceFlush(ctx, time.Since(started), err)
+	}()
+
+	if l.tracerProvider == nil {
 		return nil
 	}
 	if l.tracingClosed.Load() {
 		return ErrTracingShutdown
-	}
-	if ctx == nil {
-		ctx = context.Background()
 	}
 	return l.tracerProvider.ForceFlush(ctx)
 }
@@ -459,12 +473,20 @@ func ForceFlush(ctx context.Context) error {
 
 // Shutdown flushes pending spans and idempotently stops the logger-owned
 // TracerProvider. Call it during application shutdown when tracing is enabled.
-func (l *Logger) Shutdown(ctx context.Context) error {
-	if l == nil || l.tracerProvider == nil {
+func (l *Logger) Shutdown(ctx context.Context) (err error) {
+	if l == nil {
 		return nil
 	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	started := time.Now()
+	defer func() {
+		l.internalMetrics.recordShutdown(ctx, time.Since(started), err)
+	}()
+
+	if l.tracerProvider == nil {
+		return nil
 	}
 	l.shutdownOnce.Do(func() {
 		l.tracingClosed.Store(true)

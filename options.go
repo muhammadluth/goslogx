@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap/zapcore"
 )
@@ -35,6 +36,14 @@ type Config struct {
 	// TracerProvider is supplied and owned by the application. It is mutually
 	// exclusive with managed Tracing.
 	TracerProvider trace.TracerProvider
+
+	// MeterProvider is supplied and owned by the application. goslogx never
+	// registers, flushes, or shuts it down.
+	MeterProvider metric.MeterProvider
+
+	// InternalMetrics enables low-cardinality metrics about goslogx itself.
+	// Metrics are recorded through MeterProvider, which remains application-owned.
+	InternalMetrics bool
 }
 
 // MaskingConfig controls field masking behavior.
@@ -205,6 +214,23 @@ func WithTracing(config TracingConfig) Option {
 func WithTracerProvider(provider trace.TracerProvider) Option {
 	return func(c *Config) {
 		c.TracerProvider = provider
+	}
+}
+
+// WithMeterProvider uses an application-owned OpenTelemetry MeterProvider.
+// goslogx never registers, flushes, or shuts down the provider. A nil provider
+// is resolved to a no-op provider when the Logger is created.
+func WithMeterProvider(provider metric.MeterProvider) Option {
+	return func(c *Config) {
+		c.MeterProvider = provider
+	}
+}
+
+// WithInternalMetrics enables or disables low-cardinality metrics describing
+// log records and the internal telemetry lifecycle. The default is false.
+func WithInternalMetrics(enabled bool) Option {
+	return func(c *Config) {
+		c.InternalMetrics = enabled
 	}
 }
 
