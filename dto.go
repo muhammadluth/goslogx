@@ -2,7 +2,8 @@ package goslogx
 
 // HTTPData captures context for HTTP interactions.
 // It provides a structured schema for logging request/response and client metadata.
-// Sensitive fields in Body (JSON) and Headers are automatically masked.
+// Sensitive fields in Body and Headers are automatically masked when logged.
+// Body supports JSON strings/bytes, maps, structs, and nested arrays.
 //
 // Example:
 //
@@ -17,14 +18,16 @@ type HTTPData struct {
 	Method     string              `json:"method,omitempty"`
 	URL        string              `json:"url,omitempty"`
 	StatusCode int                 `json:"status_code,omitempty"`
-	Headers    map[string][]string `json:"headers,omitempty"`
-	Body       any                 `json:"body,omitempty"`
+	Headers    map[string][]string `json:"headers,omitempty" log:"masked:headers"`
+	Body       any                 `json:"body,omitempty" log:"masked:auto"`
 	Duration   string              `json:"duration,omitempty"`
 	ClientIP   string              `json:"client_ip,omitempty"`
 }
 
 // DBData captures context for database or cache operations.
 // It tracks the driver, operation, and execution duration.
+// Sensitive fields in Payload are automatically masked when logged.
+// Payload supports JSON strings/bytes, maps, structs, and nested arrays.
 //
 // Example:
 //
@@ -44,11 +47,13 @@ type DBData struct {
 	Table     string `json:"table,omitempty"`
 	Statement string `json:"statement,omitempty"`
 	Duration  string `json:"duration,omitempty"`
-	Payload   any    `json:"payload,omitempty"`
+	Payload   any    `json:"payload,omitempty" log:"masked:auto"`
 }
 
 // MQData captures context for Message Queue interactions.
 // It is compatible with Kafka, RabbitMQ, NATS, etc.
+// Sensitive fields in Payload are automatically masked when logged.
+// Payload supports JSON strings/bytes, maps, structs, and nested arrays.
 //
 // Example:
 //
@@ -66,11 +71,13 @@ type MQData struct {
 	Topic     string `json:"topic,omitempty"`
 	Group     string `json:"group,omitempty"`
 	MessageID string `json:"message_id,omitempty"`
-	Payload   any    `json:"payload,omitempty"`
+	Payload   any    `json:"payload,omitempty" log:"masked:auto"`
 }
 
 // GenericData provides a flexible schema for logging interactions with external
 // services that do not fit into standard HTTP, DB, or MQ categories.
+// Sensitive fields in Payload are automatically masked when logged.
+// Payload supports JSON strings/bytes, maps, structs, and nested arrays.
 //
 // Example:
 //
@@ -86,5 +93,5 @@ type MQData struct {
 type GenericData struct {
 	Service string `json:"service,omitempty"`
 	Action  string `json:"action,omitempty"`
-	Payload any    `json:"payload,omitempty"`
+	Payload any    `json:"payload,omitempty" log:"masked:auto"`
 }

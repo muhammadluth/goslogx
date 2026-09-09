@@ -196,3 +196,24 @@ func BenchmarkHTTPData_WithoutSensitiveData(b *testing.B) {
 		goslogx.Info("trace-001", "api", goslogx.MESSSAGE_TYPE_REQUEST, "request", data)
 	}
 }
+
+func BenchmarkHTTPData_AutoPayload(b *testing.B) {
+	data := goslogx.HTTPData{
+		Method: "POST",
+		URL:    "/api/v1/auth/login",
+		Headers: map[string][]string{
+			"Authorization": {"Bearer token123"},
+			"Content-Type":  {"application/json"},
+		},
+		Body: map[string]any{
+			"username": "admin@example.com",
+			"password": "secret",
+		},
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		goslogx.Info("trace-001", "api", goslogx.MESSSAGE_TYPE_REQUEST, "request", data)
+	}
+}

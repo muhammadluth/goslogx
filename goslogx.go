@@ -369,7 +369,7 @@ func (l *Logger) Warning(traceID string, module string, msg string, data any) {
 		zap.String("severity", severityWarning),
 	)
 	if data != nil {
-		fields = append(fields, zap.Any("data", data))
+		fields = append(fields, dataField("data", data))
 	}
 	logger.Log(zapcore.WarnLevel, msg, fields...)
 }
@@ -388,7 +388,7 @@ func Warning(traceID string, module string, msg string, data any) {
 		zap.String("severity", severityWarning),
 	)
 	if data != nil {
-		fields = append(fields, zap.Any("data", data))
+		fields = append(fields, dataField("data", data))
 	}
 	logger.Log(zapcore.WarnLevel, msg, fields...)
 }
@@ -442,7 +442,7 @@ func (l *Logger) Debug(traceID string, module string, msgType MsgType, msg strin
 		zap.String("severity", severityDebug),
 	)
 	if data != nil {
-		fields = append(fields, zap.Any("data", data))
+		fields = append(fields, dataField("data", data))
 	}
 	logger.Log(zapcore.DebugLevel, msg, fields...)
 }
@@ -462,7 +462,7 @@ func Debug(traceID string, module string, msgType MsgType, msg string, data any)
 		zap.String("severity", severityDebug),
 	)
 	if data != nil {
-		fields = append(fields, zap.Any("data", data))
+		fields = append(fields, dataField("data", data))
 	}
 	logger.Log(zapcore.DebugLevel, msg, fields...)
 }
