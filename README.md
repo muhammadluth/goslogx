@@ -13,7 +13,7 @@
 - **🔐 Automatic Sensitive Data Masking**
   - Smart JSON body masking for HTTP requests/responses
   - Header masking for Authorization, API keys, tokens
-  - Struct field masking with simple tags (`log:"masked:full"` or `log:"masked:partial"`)
+  - Struct field masking with tags (`log:"masked:full"`, `log:"masked:partial"`, `log:"masked:auto"`, and `log:"masked:headers"`)
   - Zero configuration required - works out of the box
 
 - **⚡ High Performance**
@@ -597,6 +597,28 @@ user := User{
 
 goslogx.Info(traceID, "user-service", goslogx.MESSSAGE_TYPE_EVENT, "user created", user)
 // Email: "jo****om", Password: "****", Name: "John Doe" (unchanged)
+```
+
+### Masking Tags
+
+Struct fields can opt into one of four masking strategies:
+
+| Tag | Use for | Behavior |
+| --- | --- | --- |
+| `log:"masked:full"` | Individual sensitive string fields | Replaces the value with `****`. |
+| `log:"masked:partial"` | Individual identifiable string fields | Keeps the first and last two characters, for example `jo****om`. |
+| `log:"masked:auto"` | Payload fields such as `Body` and `Payload` | Recursively masks nested JSON strings, bytes, maps, structs, pointers, and arrays based on field names. |
+| `log:"masked:headers"` | HTTP headers (`map[string][]string`) | Masks header values based on header names, including `Authorization`, `Cookie`, and API-key headers. |
+
+The DTO fields `HTTPData.Body`, `DBData.Payload`, `MQData.Payload`, and `GenericData.Payload` use `masked:auto`. `HTTPData.Headers` uses `masked:headers`. Payload values are copied while masking, so the original application data is not modified.
+
+```go
+type Event struct {
+    Password string         `json:"password" log:"masked:full"`
+    Email    string         `json:"email" log:"masked:partial"`
+    Payload  map[string]any `json:"payload" log:"masked:auto"`
+    Headers  map[string][]string `json:"headers" log:"masked:headers"`
+}
 ```
 
 ## 🔐 Masking Strategies

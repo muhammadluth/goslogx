@@ -459,7 +459,7 @@ func (l *Logger) Warning(traceID string, module string, msg string, data any) {
 		zap.String("severity", severityWarning),
 	)
 	if data != nil {
-		fields = append(fields, zap.Any("data", data))
+		fields = append(fields, dataField("data", data))
 	}
 	logger.Log(zapcore.WarnLevel, msg, fields...)
 	l.recordLogMetric(context.Background(), severityWarning, zapcore.WarnLevel)
@@ -480,7 +480,7 @@ func Warning(traceID string, module string, msg string, data any) {
 		zap.String("severity", severityWarning),
 	)
 	if data != nil {
-		fields = append(fields, zap.Any("data", data))
+		fields = append(fields, dataField("data", data))
 	}
 	logger.Log(zapcore.WarnLevel, msg, fields...)
 	global.recordLogMetric(context.Background(), severityWarning, zapcore.WarnLevel)
@@ -538,7 +538,7 @@ func (l *Logger) Debug(traceID string, module string, msgType MsgType, msg strin
 		zap.String("severity", severityDebug),
 	)
 	if data != nil {
-		fields = append(fields, zap.Any("data", data))
+		fields = append(fields, dataField("data", data))
 	}
 	logger.Log(zapcore.DebugLevel, msg, fields...)
 	l.recordLogMetric(context.Background(), severityDebug, zapcore.DebugLevel)
@@ -560,7 +560,7 @@ func Debug(traceID string, module string, msgType MsgType, msg string, data any)
 		zap.String("severity", severityDebug),
 	)
 	if data != nil {
-		fields = append(fields, zap.Any("data", data))
+		fields = append(fields, dataField("data", data))
 	}
 	logger.Log(zapcore.DebugLevel, msg, fields...)
 	global.recordLogMetric(context.Background(), severityDebug, zapcore.DebugLevel)
