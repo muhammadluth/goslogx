@@ -48,6 +48,12 @@ const (
 // already begun shutting down.
 var ErrTracingShutdown = errors.New("goslogx: tracing provider is shut down")
 
+var telemetryGlobalsMu sync.Mutex
+
+// A pointer wrapper lets shutdown recognize its own global registration even
+// when another application installs a non-comparable composite propagator.
+type managedPropagator struct{ propagation.TextMapPropagator }
+
 type batchProcessorConfig struct {
 	BatchTimeout       time.Duration
 	ExportTimeout      time.Duration
@@ -283,7 +289,29 @@ func newBatchProcessorOptions(cfg TracingConfig) ([]sdktrace.BatchSpanProcessorO
 	}, nil
 }
 
+func resolvedResourceConfig(cfg *Config) *Config {
+	resolved := *cfg
+	if cfg.Resource.ServiceVersion != "" {
+		resolved.Tracing.ServiceVersion = cfg.Resource.ServiceVersion
+	}
+	if cfg.Resource.DeploymentEnvironment != "" {
+		resolved.Tracing.DeploymentEnvironment = cfg.Resource.DeploymentEnvironment
+	}
+	if cfg.Resource.ServiceInstanceID != "" {
+		resolved.Tracing.ServiceInstanceID = cfg.Resource.ServiceInstanceID
+	}
+	resolved.Tracing.ResourceAttributes = cloneStringMap(cfg.Tracing.ResourceAttributes)
+	if resolved.Tracing.ResourceAttributes == nil {
+		resolved.Tracing.ResourceAttributes = make(map[string]string)
+	}
+	for key, value := range cfg.Resource.ResourceAttributes {
+		resolved.Tracing.ResourceAttributes[key] = value
+	}
+	return &resolved
+}
+
 func validateResourceConfig(cfg *Config) error {
+	cfg = resolvedResourceConfig(cfg)
 	if strings.TrimSpace(cfg.ServiceName) == "" || cfg.ServiceName == "unknown" {
 		return fmt.Errorf("goslogx: service name is required when tracing is enabled")
 	}
@@ -308,6 +336,7 @@ func validateResourceConfig(cfg *Config) error {
 }
 
 func newServiceResource(cfg *Config) (*resource.Resource, error) {
+	cfg = resolvedResourceConfig(cfg)
 	if err := validateResourceConfig(cfg); err != nil {
 		return nil, err
 	}
@@ -413,7 +442,7 @@ func (l *Logger) StartTrace(ctx context.Context, name string) (context.Context, 
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if l == nil || l.tracer == nil || l.tracingClosed.Load() {
+	if l == nil || l.tracer == nil || (l.tracerProvider != nil && l.tracingClosed.Load()) {
 		return ctx, noopEndTrace
 	}
 
@@ -429,7 +458,7 @@ func StartTrace(ctx context.Context, name string) (context.Context, func()) {
 	return globalLog.Load().StartTrace(ctx, name)
 }
 
-// ForceFlush exports all ended spans queued by the logger-owned TracerProvider.
+// ForceFlush exports pending telemetry from logger-owned providers.
 func (l *Logger) ForceFlush(ctx context.Context) (err error) {
 	if l == nil {
 		return nil
@@ -442,13 +471,28 @@ func (l *Logger) ForceFlush(ctx context.Context) (err error) {
 		l.internalMetrics.recordForceFlush(ctx, time.Since(started), err)
 	}()
 
-	if l.tracerProvider == nil {
+	if l.tracerProvider == nil && l.ownedMeterProvider == nil {
 		return nil
 	}
-	if l.tracingClosed.Load() {
-		return ErrTracingShutdown
+	select {
+	case l.lifecycleGate <- struct{}{}:
+		defer func() { <-l.lifecycleGate }()
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	return l.tracerProvider.ForceFlush(ctx)
+	if l.tracingClosed.Load() {
+		if l.tracerProvider != nil {
+			return ErrTracingShutdown
+		}
+		return ErrMetricsShutdown
+	}
+	if l.ownedMeterProvider != nil {
+		err = l.ownedMeterProvider.ForceFlush(ctx)
+	}
+	if l.tracerProvider != nil {
+		err = errors.Join(err, l.tracerProvider.ForceFlush(ctx))
+	}
+	return err
 }
 
 // TracerProvider returns the provider configured for this logger. The caller
@@ -471,8 +515,8 @@ func ForceFlush(ctx context.Context) error {
 	return globalLog.Load().ForceFlush(ctx)
 }
 
-// Shutdown flushes pending spans and idempotently stops the logger-owned
-// TracerProvider. Call it during application shutdown when tracing is enabled.
+// Shutdown idempotently stops owned metric and trace providers. External
+// providers remain application-owned. Stop application work before calling.
 func (l *Logger) Shutdown(ctx context.Context) (err error) {
 	if l == nil {
 		return nil
@@ -485,14 +529,32 @@ func (l *Logger) Shutdown(ctx context.Context) (err error) {
 		l.internalMetrics.recordShutdown(ctx, time.Since(started), err)
 	}()
 
-	if l.tracerProvider == nil {
+	if l.tracerProvider == nil && l.ownedMeterProvider == nil {
 		return nil
+	}
+	select {
+	case l.lifecycleGate <- struct{}{}:
+		defer func() { <-l.lifecycleGate }()
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 	l.shutdownOnce.Do(func() {
 		l.tracingClosed.Store(true)
-		l.shutdownErr = l.tracerProvider.Shutdown(ctx)
+		if l.ownedMeterProvider != nil {
+			l.shutdownErr = l.ownedMeterProvider.Shutdown(ctx)
+		}
+		if l.tracerProvider != nil {
+			l.shutdownErr = errors.Join(l.shutdownErr, l.tracerProvider.Shutdown(ctx))
+		}
+		telemetryGlobalsMu.Lock()
+		defer telemetryGlobalsMu.Unlock()
+		if l.registeredGlobalMetrics && otel.GetMeterProvider() == l.ownedMeterProvider {
+			otel.SetMeterProvider(l.previousMeterProvider)
+		}
 		if l.registeredGlobal && otel.GetTracerProvider() == l.tracerProvider {
 			otel.SetTracerProvider(l.previousProvider)
+		}
+		if l.registeredGlobal && otel.GetTextMapPropagator() == l.installedPropagator {
 			otel.SetTextMapPropagator(l.previousPropagator)
 		}
 		if current, ok := otel.GetErrorHandler().(*rateLimitedOTelErrorHandler); ok && current == l.otelHandler {

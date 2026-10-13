@@ -19,6 +19,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/propagation"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
@@ -47,22 +48,28 @@ func init() {
 //		goslogx.WithDebug(true),
 //	)
 type Logger struct {
-	logger              *zap.Logger
-	config              *Config
-	tracer              trace.Tracer
-	tracerProvider      *sdktrace.TracerProvider
-	configuredProvider  trace.TracerProvider
-	meterProvider       metric.MeterProvider
-	internalMetrics     *internalMetrics
-	tracingErr          error
-	tracingClosed       atomic.Bool
-	shutdownOnce        sync.Once
-	shutdownErr         error
-	otelHandler         *rateLimitedOTelErrorHandler
-	previousOTelHandler otel.ErrorHandler
-	registeredGlobal    bool
-	previousProvider    trace.TracerProvider
-	previousPropagator  propagation.TextMapPropagator
+	ownedMeterProvider      *sdkmetric.MeterProvider
+	metricsErr              error
+	previousMeterProvider   metric.MeterProvider
+	registeredGlobalMetrics bool
+	lifecycleGate           chan struct{}
+	logger                  *zap.Logger
+	config                  *Config
+	tracer                  trace.Tracer
+	tracerProvider          *sdktrace.TracerProvider
+	configuredProvider      trace.TracerProvider
+	meterProvider           metric.MeterProvider
+	internalMetrics         *internalMetrics
+	tracingErr              error
+	tracingClosed           atomic.Bool
+	shutdownOnce            sync.Once
+	shutdownErr             error
+	otelHandler             *rateLimitedOTelErrorHandler
+	previousOTelHandler     otel.ErrorHandler
+	registeredGlobal        bool
+	previousProvider        trace.TracerProvider
+	previousPropagator      propagation.TextMapPropagator
+	installedPropagator     propagation.TextMapPropagator
 }
 
 // formatStackTraceBytes formats a stack trace string into a compact, bracketed format.
@@ -274,9 +281,16 @@ func setupLog(opts ...Option) *Logger {
 	).With(zap.String("application_name", cfg.ServiceName))
 
 	result := &Logger{
+		lifecycleGate: make(chan struct{}, 1),
 		logger:        logger,
 		config:        cfg,
 		meterProvider: cfg.MeterProvider,
+	}
+	result.ownedMeterProvider, result.metricsErr = setupMetrics(cfg)
+	if result.metricsErr != nil {
+		result.meterProvider = nil
+	} else if result.ownedMeterProvider != nil {
+		result.meterProvider = result.ownedMeterProvider
 	}
 	if result.meterProvider == nil {
 		result.meterProvider = noop.NewMeterProvider()
@@ -290,23 +304,35 @@ func setupLog(opts ...Option) *Logger {
 	} else if result.tracerProvider != nil {
 		result.configuredProvider = result.tracerProvider
 	}
+	telemetryGlobalsMu.Lock()
+	defer telemetryGlobalsMu.Unlock()
+	if result.ownedMeterProvider != nil && cfg.Metrics.RegisterGlobal {
+		result.previousMeterProvider = otel.GetMeterProvider()
+		otel.SetMeterProvider(result.ownedMeterProvider)
+		result.registeredGlobalMetrics = true
+	}
 	if result.tracerProvider != nil && cfg.Tracing.RegisterGlobal {
 		result.previousProvider = otel.GetTracerProvider()
 		result.previousPropagator = otel.GetTextMapPropagator()
 		otel.SetTracerProvider(result.tracerProvider)
-		otel.SetTextMapPropagator(newPropagator())
+		result.installedPropagator = &managedPropagator{TextMapPropagator: newPropagator()}
+		otel.SetTextMapPropagator(result.installedPropagator)
 		result.registeredGlobal = true
 	}
-	if result.tracerProvider != nil {
+	if result.registeredGlobal || result.registeredGlobalMetrics {
 		result.previousOTelHandler = otel.GetErrorHandler()
-		result.otelHandler = newRateLimitedOTelErrorHandler(result.logger, cfg.Tracing.ErrorLogInterval, result.internalMetrics)
+		interval := cfg.Tracing.ErrorLogInterval
+		if !result.registeredGlobal {
+			interval = cfg.Metrics.ErrorLogInterval
+		}
+		result.otelHandler = newRateLimitedOTelErrorHandler(result.logger, interval, result.internalMetrics)
 		otel.SetErrorHandler(result.otelHandler)
 	}
 	return result
 }
 
-// MeterProvider returns the application-owned provider configured for this
-// logger. When no provider was configured, it returns a no-op provider.
+// MeterProvider returns the managed or application-owned provider configured
+// for this logger. With no provider configured, it returns an explicit no-op.
 func (l *Logger) MeterProvider() metric.MeterProvider {
 	if l == nil || l.meterProvider == nil {
 		return noop.NewMeterProvider()

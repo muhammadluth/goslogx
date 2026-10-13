@@ -2,31 +2,61 @@ name: Go
 
 on:
   push:
-    branches: ["main"]
+    branches: [main, feat/otel-integration]
   pull_request:
-    branches: ["main"]
 
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - module: .
+            go: '1.24'
+            name: core
+          - module: plugins/http
+            go: '1.24'
+            name: http
+          - module: plugins/fiber
+            go: '1.26'
+            name: fiber
+          - module: plugins/bun
+            go: '1.24'
+            name: bun
+          - module: plugins/pg
+            go: '1.24'
+            name: pg
+          - module: plugins/redis
+            go: '1.26'
+            name: redis
+          - module: examples/full_observability
+            go: '1.26'
+            name: full-observability
+    defaults:
+      run:
+        working-directory: ${{ matrix.module }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
-
-      - name: Install dependencies
-        run: go mod tidy
-
-      - name: Build
-        run: go build -v ./...
-
+          go-version: ${{ matrix.go }}
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)"
+      - name: Check dependencies
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+      - name: Vet
+        run: go vet ./...
       - name: Test
-        run: go test -v -coverprofile=coverage.txt -covermode=atomic ./...
-
-      - name: Upload coverage reports to Codecov
+        run: go test ./...
+      - name: Race and coverage
+        run: go test -race -coverprofile=coverage.txt -covermode=atomic ./...
+      - name: Upload coverage
         uses: codecov/codecov-action@v5
         with:
+          files: ${{ matrix.module }}/coverage.txt
+          flags: ${{ matrix.name }}
           token: ${{ secrets.CODECOV_TOKEN }}

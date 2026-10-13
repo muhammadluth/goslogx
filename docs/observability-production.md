@@ -1,8 +1,8 @@
 # Production observability checklist
 
-This guide separates responsibilities so that `goslogx` can provide log/trace
-correlation without taking ownership of application metrics or infrastructure
-objects.
+This guide covers Collector deployment, application-owned providers, and
+infrastructure signals. See [production](production.md) for managed provider
+lifecycle and [metrics](metrics.md) for metrics configuration.
 
 ## Architecture boundary
 
@@ -31,8 +31,9 @@ infrastructure
 | Signal/provider | Configured by | ForceFlush and Shutdown owner | `goslogx` responsibility |
 | --- | --- | --- | --- |
 | Managed tracing | `WithTracing` | `goslogx` | creates the SDK, exports spans, and may register globally only with `RegisterGlobal` |
-| External tracing | `WithTracerProvider` | application | uses it for `StartTrace` and correlation only |
-| Metrics | `WithMeterProvider` | application | uses it for application accessors and optional internal metrics only |
+| External tracing | `WithTracerProvider` | application | uses it for tracing APIs, correlation and plugin access |
+| Managed metrics | `WithMetrics` | `goslogx` | creates an OTLP/gRPC PeriodicReader SDK with shared resource identity |
+| External metrics | `WithMeterProvider` | application | uses it for application accessors and optional internal metrics only |
 | HTTP, SQL DB, NATS clients | application | application | none |
 | Host/container runtime | platform/Collector | platform/Collector | none |
 

@@ -13,6 +13,9 @@ import (
 
 // Config holds logger configuration options.
 type Config struct {
+	Resource ResourceConfig
+	Metrics  MetricsConfig
+
 	// ServiceName is the name of the service using this logger.
 	// It will be included in all log entries as "application_name".
 	ServiceName string
@@ -42,7 +45,7 @@ type Config struct {
 	MeterProvider metric.MeterProvider
 
 	// InternalMetrics enables low-cardinality metrics about goslogx itself.
-	// Metrics are recorded through MeterProvider, which remains application-owned.
+	// Metrics use the configured managed or application-owned MeterProvider.
 	InternalMetrics bool
 }
 
@@ -126,6 +129,67 @@ type TracingConfig struct {
 
 // Option configures a Logger.
 type Option func(*Config)
+
+// ResourceConfig supplies shared identity for managed traces and metrics.
+// Nonempty fields take precedence over legacy TracingConfig identity fields.
+type ResourceConfig struct {
+	ServiceVersion        string
+	DeploymentEnvironment string
+	ServiceInstanceID     string
+	ResourceAttributes    map[string]string
+}
+
+// MetricsConfig controls logger-owned OTLP/gRPC metrics.
+// Service resource identity comes from WithResource (or legacy tracing fields).
+// Zero export interval/timeout use DefaultMetricExportInterval/DefaultExportTimeout.
+// RegisterGlobal is opt-in; TLS and header validation follow TracingConfig.
+type MetricsConfig struct {
+	Enabled          bool
+	RegisterGlobal   bool
+	Endpoint         string
+	Insecure         bool
+	TLSConfig        *tls.Config
+	Headers          map[string]string
+	Compression      string
+	ExportTimeout    time.Duration
+	ExportInterval   time.Duration
+	ErrorLogInterval time.Duration
+}
+
+// WithResource configures shared resource identity and snapshots the attribute map.
+func WithResource(config ResourceConfig) Option {
+	config.ResourceAttributes = cloneStringMap(config.ResourceAttributes)
+	return func(c *Config) {
+		copied := config
+		copied.ResourceAttributes = cloneStringMap(config.ResourceAttributes)
+		c.Resource = copied
+	}
+}
+
+// WithMetrics enables managed metrics and snapshots transport configuration.
+// It is mutually exclusive with WithMeterProvider.
+func WithMetrics(config MetricsConfig) Option {
+	config.Enabled = true
+	config.TLSConfig = cloneTLSConfig(config.TLSConfig)
+	config.Headers = cloneStringMap(config.Headers)
+	return func(c *Config) {
+		copied := config
+		copied.TLSConfig = cloneTLSConfig(config.TLSConfig)
+		copied.Headers = cloneStringMap(config.Headers)
+		c.Metrics = copied
+	}
+}
+
+func cloneStringMap(source map[string]string) map[string]string {
+	if source == nil {
+		return nil
+	}
+	result := make(map[string]string, len(source))
+	for key, value := range source {
+		result[key] = value
+	}
+	return result
+}
 
 // WithServiceName sets the service name for the logger.
 // The service name appears in all log entries as "application_name".
