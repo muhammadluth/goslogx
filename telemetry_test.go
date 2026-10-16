@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	resourceimpl "github.com/muhammadluth/goslogx/internal/telemetry/resource"
+
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -40,7 +42,7 @@ func TestSharedResourcePrecedence(t *testing.T) {
 		t.Fatalf("region = %q", got)
 	}
 	cfg.Resource.ResourceAttributes["service.name"] = "override"
-	if err := validateResourceConfig(cfg); err == nil {
+	if err := resourceimpl.Validate(cfg.ServiceName, resourceimpl.Resolve(resourceimpl.Config(cfg.Resource), resourceimpl.Config{ServiceVersion: cfg.Tracing.ServiceVersion, DeploymentEnvironment: cfg.Tracing.DeploymentEnvironment, ServiceInstanceID: cfg.Tracing.ServiceInstanceID, ResourceAttributes: cfg.Tracing.ResourceAttributes})); err == nil {
 		t.Fatal("reserved attribute accepted")
 	}
 }
@@ -88,7 +90,7 @@ func TestManagedMetricsValidation(t *testing.T) {
 		if logger.MetricsError() == nil {
 			t.Fatalf("accepted config: %+v", cfg)
 		}
-		if logger.ownedMeterProvider != nil {
+		if logger.telemetry.Lifecycle.MeterProvider != nil {
 			t.Fatal("invalid config created provider")
 		}
 	}
@@ -134,8 +136,8 @@ func TestUnifiedLifecycleConcurrent(t *testing.T) {
 	metrics := &lifecycleMetricExporter{}
 	spans := &ownershipSpanExporter{}
 	logger := setupLog(WithOutput(&discardWriter{}))
-	logger.ownedMeterProvider = sdkmetric.NewMeterProvider(sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metrics, sdkmetric.WithInterval(time.Hour))))
-	logger.tracerProvider = sdktrace.NewTracerProvider(sdktrace.WithSyncer(spans))
+	logger.telemetry.Lifecycle.MeterProvider = sdkmetric.NewMeterProvider(sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metrics, sdkmetric.WithInterval(time.Hour))))
+	logger.telemetry.Lifecycle.TracerProvider = sdktrace.NewTracerProvider(sdktrace.WithSyncer(spans))
 	var wg sync.WaitGroup
 	for range 20 {
 		wg.Add(1)
@@ -175,8 +177,8 @@ func TestUnifiedLifecycleJoinsErrors(t *testing.T) {
 	traceErr := errors.New("trace shutdown")
 	metricErr := errors.New("metric shutdown")
 	logger := setupLog(WithOutput(&discardWriter{}))
-	logger.tracerProvider = sdktrace.NewTracerProvider(sdktrace.WithSyncer(&failingLifecycleSpanExporter{err: traceErr}))
-	logger.ownedMeterProvider = sdkmetric.NewMeterProvider(sdkmetric.WithReader(sdkmetric.NewPeriodicReader(&failingLifecycleMetricExporter{err: metricErr}, sdkmetric.WithInterval(time.Hour))))
+	logger.telemetry.Lifecycle.TracerProvider = sdktrace.NewTracerProvider(sdktrace.WithSyncer(&failingLifecycleSpanExporter{err: traceErr}))
+	logger.telemetry.Lifecycle.MeterProvider = sdkmetric.NewMeterProvider(sdkmetric.WithReader(sdkmetric.NewPeriodicReader(&failingLifecycleMetricExporter{err: metricErr}, sdkmetric.WithInterval(time.Hour))))
 	if err := logger.ForceFlush(nil); !errors.Is(err, metricErr) {
 		t.Fatalf("flush = %v", err)
 	}
@@ -220,10 +222,10 @@ func TestTelemetryAPIs(t *testing.T) {
 
 func TestLifecycleWaitRespectsContext(t *testing.T) {
 	logger := setupLog(WithOutput(&discardWriter{}))
-	logger.ownedMeterProvider = sdkmetric.NewMeterProvider()
-	defer logger.ownedMeterProvider.Shutdown(context.Background())
-	logger.lifecycleGate <- struct{}{}
-	defer func() { <-logger.lifecycleGate }()
+	logger.telemetry.Lifecycle.MeterProvider = sdkmetric.NewMeterProvider()
+	defer logger.telemetry.Lifecycle.MeterProvider.Shutdown(context.Background())
+	logger.telemetry.Lifecycle.Gate <- struct{}{}
+	defer func() { <-logger.telemetry.Lifecycle.Gate }()
 	for _, operation := range []func(context.Context) error{logger.ForceFlush, logger.Shutdown} {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 		err := operation(ctx)
@@ -232,7 +234,7 @@ func TestLifecycleWaitRespectsContext(t *testing.T) {
 			t.Fatalf("wait = %v", err)
 		}
 	}
-	if logger.tracingClosed.Load() {
+	if logger.telemetry.Lifecycle.Closed.Load() {
 		t.Fatal("waiting caller closed telemetry")
 	}
 }
@@ -375,7 +377,7 @@ func TestExternalTracingRemainsUsableAfterManagedMetricsShutdown(t *testing.T) {
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
 	defer tp.Shutdown(context.Background())
 	logger := setupLog(WithOutput(&discardWriter{}), WithTracerProvider(tp))
-	logger.ownedMeterProvider = sdkmetric.NewMeterProvider()
+	logger.telemetry.Lifecycle.MeterProvider = sdkmetric.NewMeterProvider()
 	if err := logger.Shutdown(context.Background()); err != nil {
 		t.Fatal(err)
 	}

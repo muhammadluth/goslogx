@@ -9,7 +9,7 @@ services:
       OTLP_BACKEND_ENDPOINT: tempo:4317
       OTLP_BACKEND_INSECURE: "true"
     volumes:
-      - ../../otel-collector.yaml:/etc/otelcol/otel-collector.yaml:ro
+      - ./collector.yaml:/etc/otelcol/otel-collector.yaml:ro
       - collector-wal:/var/lib/otelcol/queue
     ports:
       - "127.0.0.1:4317:4317"

@@ -6,7 +6,7 @@
 [![codecov](https://codecov.io/gh/muhammadluth/goslogx/graph/badge.svg?token=QD1YFY5MC8)](https://codecov.io/gh/muhammadluth/goslogx)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Go library for structured logging, OpenTelemetry tracing and metrics, and trace/log correlation. Built on [Zap](https://github.com/uber-go/zap), goslogx includes sensitive-field masking and optional integrations for HTTP, Fiber, Bun, go-pg and Redis.
+Go library for structured logging, OpenTelemetry tracing and metrics, and trace/log correlation. Built on [Zap](https://github.com/uber-go/zap), goslogx includes sensitive-field masking and optional HTTP, database and messaging integrations.
 
 Read the [documentation](docs/README.md) for configuration, integrations and production usage.
 
@@ -16,7 +16,7 @@ Read the [documentation](docs/README.md) for configuration, integrations and pro
 go get github.com/muhammadluth/goslogx
 ```
 
-Core requires Go 1.24 or later. Fiber and Redis plugins require Go 1.26. Each plugin has its own module, so installing core does not pull framework, ORM or Redis dependencies.
+Core requires Go 1.24 or later. Fiber, Redis and the expanded database/messaging modules require Go 1.26. Each plugin has its own module, so installing core does not pull framework, database or messaging dependencies.
 
 ## Basic logging
 
@@ -76,7 +76,7 @@ maskedBytes := goslogx.MaskingLogJSONBytes("body", jsonBytes)
 maskedHeaders := goslogx.MaskingLogHttpHeaders("headers", headerMap)
 ```
 
-Masking does not sanitize arbitrary OpenTelemetry attributes. See [cardinality and privacy](docs/cardinality.md) when defining telemetry fields.
+Masking does not sanitize arbitrary OpenTelemetry attributes. See [cardinality and privacy](docs/guides/cardinality.md) when defining telemetry fields.
 
 ## Tracing and metrics
 
@@ -117,44 +117,58 @@ The example uses OpenTelemetry's `trace` and `attribute` packages. Context logs 
 
 Use `logger.Tracer("payment-service")` and `logger.Meter("payment-service")` for native OpenTelemetry APIs. You can supply application-owned providers through `WithTracerProvider` and `WithMeterProvider`. Managed and external configuration for the same signal are mutually exclusive. Applications own the lifecycle of external providers.
 
-After stopping application work, call `ForceFlush` and `Shutdown` with a bounded context for managed providers. See [observability](docs/observability.md), [tracing](docs/tracing.md), [metrics](docs/metrics.md) and [production](docs/production.md) for details.
+After stopping application work, call `ForceFlush` and `Shutdown` with a bounded context for managed providers. See [observability](docs/guides/observability.md), [tracing](docs/guides/tracing.md), [metrics](docs/guides/metrics.md) and [production](docs/guides/production.md) for details.
 
 ## Optional integrations
 
 Install the plugin modules your application needs. The install commands require published plugin versions and a core version containing the telemetry APIs; use the repository's local replacements when working from this checkout.
 
 ```bash
-go get github.com/muhammadluth/goslogx/plugins/fiber
-go get github.com/muhammadluth/goslogx/plugins/http
-go get github.com/muhammadluth/goslogx/plugins/bun
-go get github.com/muhammadluth/goslogx/plugins/pg
-go get github.com/muhammadluth/goslogx/plugins/redis
+go get github.com/muhammadluth/goslogx/plugins/http/fiber
+go get github.com/muhammadluth/goslogx/plugins/http/std
+go get github.com/muhammadluth/goslogx/plugins/grpc
+go get github.com/muhammadluth/goslogx/plugins/http/gin
+go get github.com/muhammadluth/goslogx/plugins/http/echo
+go get github.com/muhammadluth/goslogx/plugins/http/chi
+go get github.com/muhammadluth/goslogx/plugins/http/gorillamux
+go get github.com/muhammadluth/goslogx/plugins/database/bun
+go get github.com/muhammadluth/goslogx/plugins/database/pg
+go get github.com/muhammadluth/goslogx/plugins/cache/redis
+go get github.com/muhammadluth/goslogx/plugins/database/pgx
+go get github.com/muhammadluth/goslogx/plugins/database/gorm
+go get github.com/muhammadluth/goslogx/plugins/messaging/nats
+go get github.com/muhammadluth/goslogx/plugins/messaging/kafka/franzgo
+go get github.com/muhammadluth/goslogx/plugins/messaging/rabbitmq
 ```
 
 | Integration | Guide |
 | --- | --- |
-| Fiber v3 HTTP server | [Fiber](docs/integrations/fiber.md) |
-| net/http server and client | [HTTP](docs/integrations/http.md) |
-| Bun ORM | [Bun](docs/integrations/bun.md) |
-| go-pg v10 compatibility | [go-pg](docs/integrations/pg.md) |
-| go-redis v9 clients | [Redis](docs/integrations/redis.md) |
+| Fiber v3 HTTP server | [Fiber](docs/integrations/http/fiber.md) |
+| net/http server and client | [HTTP](docs/integrations/http/std.md) |
+| Bun ORM | [Bun](docs/integrations/database/bun.md) |
+| go-pg v10 compatibility | [go-pg](docs/integrations/database/pg.md) |
+| go-redis v9 clients | [Redis](docs/integrations/cache/redis.md) |
+
+[gRPC](docs/integrations/grpc/README.md) provides client/server stats handlers. [HTTP integrations](docs/integrations/http/README.md) cover net/http, Fiber v3, Gin, Echo v4, Chi, Gorilla Mux, httprouter, go-restful and fasthttp. Use the canonical `plugins/http/std` and `plugins/http/fiber` paths. The [HTTP examples](examples/http/README.md) check database, Redis, messaging and HTTP client correlation across Tier 1 servers.
 
 Plugins accept `goslogx.TelemetryProvider`, use explicit providers and preserve application context. Tracing-only, metrics-only and no-op configurations work without requiring global providers.
 
-The [full observability example](examples/full_observability/README.md) connects Fiber, Bun, Redis and outbound HTTP in one trace. See [plugins](docs/plugins.md) for configuration and the plugin authoring contract.
+Additional optional modules cover [SQL and driver compatibility](docs/integrations/database/sql.md), [pgx](docs/integrations/database/pgx.md), [GORM](docs/integrations/database/gorm.md), [sqlx](docs/integrations/database/sqlx.md), [Ent](docs/integrations/database/ent.md), [MongoDB](docs/integrations/database/mongo.md), [ClickHouse](docs/integrations/database/clickhouse.md), [Cassandra](docs/integrations/database/cassandra.md), [Elasticsearch](docs/integrations/database/elasticsearch.md), [OpenSearch](docs/integrations/database/opensearch.md), [Neo4j](docs/integrations/database/neo4j.md), [DynamoDB](docs/integrations/database/dynamodb.md), [NATS](docs/integrations/messaging/nats.md), [Kafka](docs/integrations/messaging/kafka.md) and [RabbitMQ](docs/integrations/messaging/rabbitmq.md). See [privacy and instrumentation layers](docs/architecture/integration-policy.md) for safe defaults and automatic-instrumentation coexistence.
+
+The [full observability example](examples/full-observability/README.md) connects Fiber, Bun, Redis, NATS, a remote worker and outbound HTTP in one trace. See [plugins](docs/integrations/README.md) for configuration and the plugin authoring contract.
 
 ## Documentation
 
 Start at the [documentation index](docs/README.md).
 
-- [Observability configuration and ownership](docs/observability.md)
-- [Tracing and log correlation](docs/tracing.md)
-- [Managed and custom metrics](docs/metrics.md)
-- [Architecture](docs/architecture.md)
-- [Plugins and authoring](docs/plugins.md)
-- [Cardinality and privacy](docs/cardinality.md)
-- [Production and graceful shutdown](docs/production.md)
-- [Collector and infrastructure](docs/observability-production.md)
+- [Observability configuration and ownership](docs/guides/observability.md)
+- [Tracing and log correlation](docs/guides/tracing.md)
+- [Managed and custom metrics](docs/guides/metrics.md)
+- [Architecture](docs/architecture/README.md)
+- [Plugins and authoring](docs/integrations/README.md)
+- [Cardinality and privacy](docs/guides/cardinality.md)
+- [Production and graceful shutdown](docs/guides/production.md)
+- [Collector and infrastructure](docs/guides/observability-production.md)
 
 The public API reference is available on [pkg.go.dev](https://pkg.go.dev/github.com/muhammadluth/goslogx).
 
@@ -177,3 +191,5 @@ Root `go test ./...` excludes nested modules. The validation script runs depende
 ## License
 
 [MIT](LICENSE).
+
+For local development, `make test-all` discovers and validates every Go module; root `go test ./...` covers core and its internal implementation only. `make check-core` verifies that frameworks and contrib instrumentation do not enter the core dependency graph. Collector configurations are in [deployments/otel-collector](deployments/otel-collector/README.md).

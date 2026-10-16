@@ -15,13 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/metric"
-	"go.opentelemetry.io/otel/metric/noop"
-	"go.opentelemetry.io/otel/propagation"
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/trace"
+	telemetryimpl "github.com/muhammadluth/goslogx/internal/telemetry"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -38,38 +32,11 @@ func init() {
 	globalLog.Store(setupLog())
 }
 
-// Logger wraps zap.Logger with custom formatting and stack trace support.
-// Create a new Logger using New() with functional options.
-//
-// Example:
-//
-//	logger := goslogx.New(
-//		goslogx.WithServiceName("my-service"),
-//		goslogx.WithDebug(true),
-//	)
+// Logger combines structured logging with a public telemetry facade.
 type Logger struct {
-	ownedMeterProvider      *sdkmetric.MeterProvider
-	metricsErr              error
-	previousMeterProvider   metric.MeterProvider
-	registeredGlobalMetrics bool
-	lifecycleGate           chan struct{}
-	logger                  *zap.Logger
-	config                  *Config
-	tracer                  trace.Tracer
-	tracerProvider          *sdktrace.TracerProvider
-	configuredProvider      trace.TracerProvider
-	meterProvider           metric.MeterProvider
-	internalMetrics         *internalMetrics
-	tracingErr              error
-	tracingClosed           atomic.Bool
-	shutdownOnce            sync.Once
-	shutdownErr             error
-	otelHandler             *rateLimitedOTelErrorHandler
-	previousOTelHandler     otel.ErrorHandler
-	registeredGlobal        bool
-	previousProvider        trace.TracerProvider
-	previousPropagator      propagation.TextMapPropagator
-	installedPropagator     propagation.TextMapPropagator
+	logger    *zap.Logger
+	config    *Config
+	telemetry *telemetryimpl.Runtime
 }
 
 // formatStackTraceBytes formats a stack trace string into a compact, bracketed format.
@@ -280,70 +247,9 @@ func setupLog(opts ...Option) *Logger {
 		zap.AddStacktrace(zapcore.FatalLevel),
 	).With(zap.String("application_name", cfg.ServiceName))
 
-	result := &Logger{
-		lifecycleGate: make(chan struct{}, 1),
-		logger:        logger,
-		config:        cfg,
-		meterProvider: cfg.MeterProvider,
-	}
-	result.ownedMeterProvider, result.metricsErr = setupMetrics(cfg)
-	if result.metricsErr != nil {
-		result.meterProvider = nil
-	} else if result.ownedMeterProvider != nil {
-		result.meterProvider = result.ownedMeterProvider
-	}
-	if result.meterProvider == nil {
-		result.meterProvider = noop.NewMeterProvider()
-	}
-	if cfg.InternalMetrics {
-		result.internalMetrics = newInternalMetrics(result.meterProvider)
-	}
-	result.tracer, result.tracerProvider, result.tracingErr = setupTracing(cfg)
-	if result.tracingErr == nil && cfg.TracerProvider != nil {
-		result.configuredProvider = cfg.TracerProvider
-	} else if result.tracerProvider != nil {
-		result.configuredProvider = result.tracerProvider
-	}
-	telemetryGlobalsMu.Lock()
-	defer telemetryGlobalsMu.Unlock()
-	if result.ownedMeterProvider != nil && cfg.Metrics.RegisterGlobal {
-		result.previousMeterProvider = otel.GetMeterProvider()
-		otel.SetMeterProvider(result.ownedMeterProvider)
-		result.registeredGlobalMetrics = true
-	}
-	if result.tracerProvider != nil && cfg.Tracing.RegisterGlobal {
-		result.previousProvider = otel.GetTracerProvider()
-		result.previousPropagator = otel.GetTextMapPropagator()
-		otel.SetTracerProvider(result.tracerProvider)
-		result.installedPropagator = &managedPropagator{TextMapPropagator: newPropagator()}
-		otel.SetTextMapPropagator(result.installedPropagator)
-		result.registeredGlobal = true
-	}
-	if result.registeredGlobal || result.registeredGlobalMetrics {
-		result.previousOTelHandler = otel.GetErrorHandler()
-		interval := cfg.Tracing.ErrorLogInterval
-		if !result.registeredGlobal {
-			interval = cfg.Metrics.ErrorLogInterval
-		}
-		result.otelHandler = newRateLimitedOTelErrorHandler(result.logger, interval, result.internalMetrics)
-		otel.SetErrorHandler(result.otelHandler)
-	}
+	result := &Logger{logger: logger, config: cfg}
+	result.telemetry = newTelemetry(cfg, logger)
 	return result
-}
-
-// MeterProvider returns the managed or application-owned provider configured
-// for this logger. With no provider configured, it returns an explicit no-op.
-func (l *Logger) MeterProvider() metric.MeterProvider {
-	if l == nil || l.meterProvider == nil {
-		return noop.NewMeterProvider()
-	}
-	return l.meterProvider
-}
-
-// MeterProvider returns the provider configured on the global logger. It never
-// reads or changes the OpenTelemetry global MeterProvider.
-func MeterProvider() metric.MeterProvider {
-	return globalLog.Load().MeterProvider()
 }
 
 // Severity level constants for Cloud Logging compatibility.
@@ -374,25 +280,6 @@ func getFields() []zap.Field {
 func putFields(f []zap.Field) {
 	clear(f[:cap(f)])
 	fieldPool.Put(f[:0])
-}
-
-// appendOTELFields appends trace correlation fields from a valid SpanContext.
-// It deliberately reads only the SpanContext and never records or exports data.
-func appendOTELFields(ctx context.Context, fields []zap.Field) []zap.Field {
-	if ctx == nil {
-		return fields
-	}
-
-	spanContext := trace.SpanContextFromContext(ctx)
-	if !spanContext.IsValid() {
-		return fields
-	}
-
-	return append(fields,
-		zap.String("obs_trace_id", spanContext.TraceID().String()),
-		zap.String("obs_span_id", spanContext.SpanID().String()),
-		zap.String("obs_trace_flags", spanContext.TraceFlags().String()),
-	)
 }
 
 // Fatal logs a critical error and terminates the process.

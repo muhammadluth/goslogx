@@ -1,0 +1,74 @@
+# Requires the OpenTelemetry Collector Contrib distribution because it uses the
+# hostmetrics receiver. Deploy this configuration as a per-node agent, not as
+# the trace gateway in collector.yaml.
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+  hostmetrics:
+    collection_interval: 30s
+    # When containerized, mount the node filesystem at /hostfs.
+    root_path: /hostfs
+    scrapers:
+      cpu: {}
+      memory: {}
+      network: {}
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 75
+    spike_limit_percentage: 20
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+    send_batch_max_size: 1024
+
+exporters:
+  otlp/traces_backend:
+    endpoint: ${env:OTLP_TRACE_BACKEND_ENDPOINT}
+    tls:
+      insecure: ${env:OTLP_TRACE_BACKEND_INSECURE}
+    timeout: 10s
+    retry_on_failure:
+      enabled: true
+    sending_queue:
+      enabled: true
+      queue_size: 10000
+  # Tempo is trace-only. Configure an OTLP-compatible metrics backend such as
+  # Prometheus, Mimir, or another OTLP metrics service here.
+  otlp/metrics_backend:
+    endpoint: ${env:OTLP_METRICS_BACKEND_ENDPOINT}
+    tls:
+      insecure: ${env:OTLP_METRICS_BACKEND_INSECURE}
+    timeout: 10s
+    retry_on_failure:
+      enabled: true
+    sending_queue:
+      enabled: true
+      queue_size: 10000
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/traces_backend]
+    metrics:
+      receivers: [otlp, hostmetrics]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/metrics_backend]
+  telemetry:
+    metrics:
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888

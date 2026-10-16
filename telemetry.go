@@ -1,65 +1,33 @@
 package goslogx
 
 import (
-	"context"
-
+	telemetryimpl "github.com/muhammadluth/goslogx/internal/telemetry"
+	metricsimpl "github.com/muhammadluth/goslogx/internal/telemetry/metrics"
+	resourceimpl "github.com/muhammadluth/goslogx/internal/telemetry/resource"
+	tracingimpl "github.com/muhammadluth/goslogx/internal/telemetry/tracing"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
-	"go.opentelemetry.io/otel/trace/noop"
+	"go.uber.org/zap"
 )
 
-// TelemetryProvider supplies explicit providers to optional instrumentation.
-// Implementations retain ownership of their providers.
-type TelemetryProvider interface {
+// TracingProvider supplies tracing and generic context propagation.
+type TracingProvider interface {
 	TracerProvider() trace.TracerProvider
-	MeterProvider() metric.MeterProvider
 	TextMapPropagator() propagation.TextMapPropagator
+}
+
+// MetricsProvider supplies metrics without transferring provider ownership.
+type MetricsProvider interface{ MeterProvider() metric.MeterProvider }
+
+// TelemetryProvider is the public capability contract consumed by plugins.
+type TelemetryProvider interface {
+	TracingProvider
+	MetricsProvider
 }
 
 var _ TelemetryProvider = (*Logger)(nil)
 
-var disabledSpan trace.Span = noop.Span{}
-
-func (l *Logger) Meter(name string, options ...metric.MeterOption) metric.Meter {
-	if name == "" {
-		name = instrumentationName
-	}
-	return l.MeterProvider().Meter(name, options...)
+func newTelemetry(cfg *Config, logger *zap.Logger) *telemetryimpl.Runtime {
+	return telemetryimpl.New(telemetryimpl.Config{ServiceName: cfg.ServiceName, Resource: resourceimpl.Config(cfg.Resource), Tracing: tracingimpl.Config(cfg.Tracing), Metrics: metricsimpl.Config(cfg.Metrics), TracerProvider: cfg.TracerProvider, MeterProvider: cfg.MeterProvider, InternalMetrics: cfg.InternalMetrics}, logger)
 }
-
-func Meter(name string, options ...metric.MeterOption) metric.Meter {
-	return globalLog.Load().Meter(name, options...)
-}
-
-func (l *Logger) Tracer(name string, options ...trace.TracerOption) trace.Tracer {
-	if name == "" {
-		name = instrumentationName
-	}
-	if l == nil || l.configuredProvider == nil || (l.tracerProvider != nil && l.tracingClosed.Load()) {
-		return noop.NewTracerProvider().Tracer(name, options...)
-	}
-	return l.configuredProvider.Tracer(name, options...)
-}
-
-func Tracer(name string, options ...trace.TracerOption) trace.Tracer {
-	return globalLog.Load().Tracer(name, options...)
-}
-
-func (l *Logger) StartSpan(ctx context.Context, name string, options ...trace.SpanStartOption) (context.Context, trace.Span) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if l == nil || l.configuredProvider == nil || (l.tracerProvider != nil && l.tracingClosed.Load()) {
-		return ctx, disabledSpan
-	}
-	return l.Tracer(instrumentationName).Start(ctx, name, options...)
-}
-
-func StartSpan(ctx context.Context, name string, options ...trace.SpanStartOption) (context.Context, trace.Span) {
-	return globalLog.Load().StartSpan(ctx, name, options...)
-}
-
-// TextMapPropagator supplies W3C trace context to plugins without propagating
-// potentially sensitive baggage. Legacy package helpers continue to support baggage.
-func (l *Logger) TextMapPropagator() propagation.TextMapPropagator { return propagation.TraceContext{} }

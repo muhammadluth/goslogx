@@ -7,7 +7,7 @@ application -> OTLP/gRPC receiver -> memory limiter -> resource -> batch
             -> persistent sending queue + retry -> Tempo/OTLP backend
 ```
 
-The root [`otel-collector.yaml`](../../otel-collector.yaml) is the canonical
+[`collector.yaml`](collector.yaml) in this directory is the canonical
 Collector configuration. It enables health checks, JSON internal logs,
 Prometheus internal metrics, retry, and a disk-backed exporter queue. Tail
 sampling policies are included but intentionally omitted from the active
@@ -26,7 +26,7 @@ to come from the layer that owns the resource:
 | Collector CPU/memory and queue | Collector internal telemetry on port `8888` |
 | Log records and bytes | Loki/Alloy pipeline metrics |
 
-[`otel-collector-metrics.yaml`](../../otel-collector-metrics.yaml) is a
+[`collector-hostmetrics.yaml`](collector-hostmetrics.yaml) is a
 separate Contrib Collector template for host metrics and application OTLP
 metrics. It has separate `traces` and `metrics` pipelines; the metrics pipeline
 uses both `otlp` and `hostmetrics` receivers. Set

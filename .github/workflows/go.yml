@@ -6,33 +6,29 @@ on:
   pull_request:
 
 jobs:
+  modules:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.discover.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: discover
+        shell: python
+        run: |
+          import json, os, pathlib, re
+          modules = []
+          for manifest in sorted(pathlib.Path(".").rglob("go.mod")):
+              module = str(manifest.parent)
+              version = re.search(r"^go ([\d.]+)", manifest.read_text(), re.M).group(1)
+              modules.append({"module": module, "go": version, "name": "core" if module == "." else module.replace("/", "-")})
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("matrix=" + json.dumps({"include": modules}) + "\n")
   test:
+    needs: modules
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - module: .
-            go: '1.24'
-            name: core
-          - module: plugins/http
-            go: '1.24'
-            name: http
-          - module: plugins/fiber
-            go: '1.26'
-            name: fiber
-          - module: plugins/bun
-            go: '1.24'
-            name: bun
-          - module: plugins/pg
-            go: '1.24'
-            name: pg
-          - module: plugins/redis
-            go: '1.26'
-            name: redis
-          - module: examples/full_observability
-            go: '1.26'
-            name: full-observability
+      matrix: ${{ fromJSON(needs.modules.outputs.matrix) }}
     defaults:
       run:
         working-directory: ${{ matrix.module }}
@@ -48,6 +44,12 @@ jobs:
         run: |
           go mod tidy
           git diff --exit-code -- go.mod go.sum
+      - name: Core dependency isolation
+        if: matrix.module == '.'
+        run: bash scripts/check-core-deps.sh
+      - name: Canonical plugin layout
+        if: matrix.module == '.'
+        run: bash scripts/check-plugin-layout.sh
       - name: Vet
         run: go vet ./...
       - name: Test

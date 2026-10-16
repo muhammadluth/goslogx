@@ -7,9 +7,17 @@
 *.test
 /bin/
 /dist/
-/examples/full_observability/full_observability
-/examples/http_masking/http_masking
-/examples/otel_trace_correlation/otel_trace_correlation
+/examples/full-observability/full-observability
+/examples/http/masking/masking
+/examples/http/std/std
+/examples/http/fiber/fiber
+/examples/http/gin/gin
+/examples/http/echo/echo
+/examples/http/chi/chi
+/examples/http/gorillamux/gorillamux
+/examples/database/sql/sql
+/examples/messaging/nats/nats
+/examples/basic/metrics/metrics
 
 # Coverage, test output, and profiling artifacts (all modules)
 *.out

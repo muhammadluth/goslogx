@@ -1,10 +1,10 @@
 package goslogx
 
 import (
-	"crypto/tls"
 	"io"
 	"os"
-	"time"
+
+	tracingimpl "github.com/muhammadluth/goslogx/internal/telemetry/tracing"
 
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
@@ -57,124 +57,18 @@ type MaskingConfig struct {
 	Enabled bool
 }
 
-// TracingConfig controls OpenTelemetry tracing initialization.
-type TracingConfig struct {
-	// Enabled creates an OpenTelemetry TracerProvider inside goslogx.
-	Enabled bool
-
-	// RegisterGlobal explicitly installs the goslogx-owned provider as the
-	// OpenTelemetry global provider. The previous global provider is restored
-	// during Shutdown. The default is false.
-	RegisterGlobal bool
-
-	// Endpoint is the OTLP/gRPC collector URL.
-	Endpoint string
-
-	// SamplingRatio is the fraction of root traces to sample, from 0.0 to 1.0.
-	// The zero value uses DefaultSamplingRatio. Parent sampling decisions are
-	// always honored.
-	SamplingRatio float64
-
-	// Insecure disables transport security. Use it only for trusted local
-	// Collector connections.
-	Insecure bool
-
-	// TLSConfig configures TLS, including custom root CAs and mTLS certificates.
-	// It cannot be combined with Insecure.
-	TLSConfig *tls.Config
-
-	// Headers are sent with every OTLP/gRPC export request. Values commonly
-	// contain credentials and are never included in validation errors.
-	Headers map[string]string
-
-	// Compression optionally enables payload compression. The supported value
-	// is "gzip"; an empty value disables compression.
-	Compression string
-
-	// ExportTimeout limits each OTLP export request. The zero value uses the
-	// DefaultExportTimeout. It also bounds batch processor export calls.
-	ExportTimeout time.Duration
-
-	// BatchTimeout is the maximum delay before queued spans are exported. The
-	// zero value uses DefaultBatchTimeout.
-	BatchTimeout time.Duration
-
-	// MaxQueueSize is the maximum number of spans waiting for export. New spans
-	// are dropped when this non-blocking queue is full. The zero value uses
-	// DefaultMaxQueueSize.
-	MaxQueueSize int
-
-	// MaxExportBatchSize is the maximum number of spans per export request. The
-	// zero value uses DefaultMaxExportBatchSize, capped by MaxQueueSize.
-	MaxExportBatchSize int
-
-	// ServiceVersion identifies the deployed service build.
-	ServiceVersion string
-
-	// DeploymentEnvironment identifies the deployment environment, such as
-	// production or staging.
-	DeploymentEnvironment string
-
-	// ServiceInstanceID uniquely identifies this service instance.
-	ServiceInstanceID string
-
-	// ResourceAttributes adds deployment-specific resource attributes. Reserved
-	// service attributes cannot be overridden through this map.
-	ResourceAttributes map[string]string
-
-	// ErrorLogInterval limits repeated OpenTelemetry internal error logs. The
-	// zero value uses DefaultOTelErrorLogInterval.
-	ErrorLogInterval time.Duration
-}
-
 // Option configures a Logger.
 type Option func(*Config)
-
-// ResourceConfig supplies shared identity for managed traces and metrics.
-// Nonempty fields take precedence over legacy TracingConfig identity fields.
-type ResourceConfig struct {
-	ServiceVersion        string
-	DeploymentEnvironment string
-	ServiceInstanceID     string
-	ResourceAttributes    map[string]string
-}
-
-// MetricsConfig controls logger-owned OTLP/gRPC metrics.
-// Service resource identity comes from WithResource (or legacy tracing fields).
-// Zero export interval/timeout use DefaultMetricExportInterval/DefaultExportTimeout.
-// RegisterGlobal is opt-in; TLS and header validation follow TracingConfig.
-type MetricsConfig struct {
-	Enabled          bool
-	RegisterGlobal   bool
-	Endpoint         string
-	Insecure         bool
-	TLSConfig        *tls.Config
-	Headers          map[string]string
-	Compression      string
-	ExportTimeout    time.Duration
-	ExportInterval   time.Duration
-	ErrorLogInterval time.Duration
-}
-
-// WithResource configures shared resource identity and snapshots the attribute map.
-func WithResource(config ResourceConfig) Option {
-	config.ResourceAttributes = cloneStringMap(config.ResourceAttributes)
-	return func(c *Config) {
-		copied := config
-		copied.ResourceAttributes = cloneStringMap(config.ResourceAttributes)
-		c.Resource = copied
-	}
-}
 
 // WithMetrics enables managed metrics and snapshots transport configuration.
 // It is mutually exclusive with WithMeterProvider.
 func WithMetrics(config MetricsConfig) Option {
 	config.Enabled = true
-	config.TLSConfig = cloneTLSConfig(config.TLSConfig)
+	config.TLSConfig = tracingimpl.CloneTLSConfig(config.TLSConfig)
 	config.Headers = cloneStringMap(config.Headers)
 	return func(c *Config) {
 		copied := config
-		copied.TLSConfig = cloneTLSConfig(config.TLSConfig)
+		copied.TLSConfig = tracingimpl.CloneTLSConfig(config.TLSConfig)
 		copied.Headers = cloneStringMap(config.Headers)
 		c.Metrics = copied
 	}
