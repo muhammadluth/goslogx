@@ -1,0 +1,34 @@
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.148.0
+    command: ["--config=/etc/otelcol/otel-collector.yaml"]
+    restart: unless-stopped
+    environment:
+      COLLECTOR_NAME: goslogx-local-collector
+      DEPLOYMENT_ENVIRONMENT: local
+      OTLP_BACKEND_ENDPOINT: tempo:4317
+      OTLP_BACKEND_INSECURE: "true"
+    volumes:
+      - ./collector.yaml:/etc/otelcol/otel-collector.yaml:ro
+      - collector-wal:/var/lib/otelcol/queue
+    ports:
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:13133:13133"
+      - "127.0.0.1:8888:8888"
+    depends_on:
+      - tempo
+
+  tempo:
+    image: grafana/tempo:2.10.7
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    restart: unless-stopped
+    volumes:
+      - ./tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "127.0.0.1:3200:3200"
+
+volumes:
+  collector-wal:
+  tempo-data:
+

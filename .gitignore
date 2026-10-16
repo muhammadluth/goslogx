@@ -1,32 +1,50 @@
-# If you prefer the allow list template instead of the deny list, see community template:
-# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
-#
-# Binaries for programs and plugins
+# Compiled binaries and Go test executables
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
-
-# Test binary, built with `go test -c`
 *.test
+/bin/
+/dist/
+/examples/full-observability/full-observability
+/examples/http/masking/masking
+/examples/http/std/std
+/examples/http/fiber/fiber
+/examples/http/gin/gin
+/examples/http/echo/echo
+/examples/http/chi/chi
+/examples/http/gorillamux/gorillamux
+/examples/database/sql/sql
+/examples/messaging/nats/nats
+/examples/basic/metrics/metrics
 
-# Code coverage profiles and other test artifacts
+# Coverage, test output, and profiling artifacts (all modules)
 *.out
-coverage.*
 *.coverprofile
+coverage.*
 profile.cov
+*.prof
+*.pprof
 
-# Dependency directories (remove the comment below to include it)
-# vendor/
-
-# Go workspace file
+# Local Go workspace configuration
+# Keep go.mod and go.sum tracked in every module.
 go.work
 go.work.sum
 
-# env file
+# Local environment files; retain example/template configuration
 .env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
 
-# Editor/IDE
-# .idea/
-# .vscode/
+# Local editor and operating-system files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+._*
+Thumbs.db

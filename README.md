@@ -1,372 +1,336 @@
-# goslogx
+# GOSLOGX
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/muhammadluth/goslogx.svg)](https://pkg.go.dev/github.com/muhammadluth/goslogx)
 [![Go Report Card](https://goreportcard.com/badge/github.com/muhammadluth/goslogx)](https://goreportcard.com/report/github.com/muhammadluth/goslogx)
 [![Build Status](https://github.com/muhammadluth/goslogx/workflows/Go/badge.svg)](https://github.com/muhammadluth/goslogx/actions)
 [![codecov](https://codecov.io/gh/muhammadluth/goslogx/graph/badge.svg?token=QD1YFY5MC8)](https://codecov.io/gh/muhammadluth/goslogx)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**goslogx** is a high-performance, production-ready structured logging library for Go. Built on top of [Uber's Zap](https://github.com/uber-go/zap), it provides automatic sensitive data masking, compact stack traces, and standardized DTOs for consistent observability across distributed systems.
+**A MODULAR OBSERVABILITY SDK FOR PRODUCTION GO APPLICATIONS.**
 
-## ✨ Key Features
+goslogx combines structured logging, sensitive-data masking, OpenTelemetry tracing, OpenTelemetry metrics, trace/log correlation, and optional framework integrations behind one consistent Go API.
 
-- **🔐 Automatic Sensitive Data Masking**
-  - Smart JSON body masking for HTTP requests/responses
-  - Header masking for Authorization, API keys, tokens
-  - Struct field masking with tags (`log:"masked:full"`, `log:"masked:partial"`, `log:"masked:auto"`, and `log:"masked:headers"`)
-  - Zero configuration required - works out of the box
+It is designed for teams that want production observability without coupling application code to a specific backend or forcing every framework, database, cache, and messaging dependency into the core module.
 
-- **⚡ High Performance**
-  - Zero-allocation design using `sync.Pool` and cached reflection
-  - **1-4 allocs/op** for most logging operations
-  - **< 2µs/op** for simple logs
-  - Efficient JSON masking with minimal overhead
+```text
+APPLICATION
+    │
+    ├── LOGS
+    ├── TRACES
+    ├── METRICS
+    └── CONTEXT PROPAGATION
+            │
+            ▼
+         GOSLOGX
+            │
+            ▼
+     OPENTELEMETRY / OTLP
+            │
+            ▼
+   OPENTELEMETRY COLLECTOR
+            │
+      ┌─────┼──────────────┐
+      ▼     ▼              ▼
+   GRAFANA  SIGNOZ       OTHER OTLP BACKENDS
+```
 
-- **📊 Standardized DTOs**
-  - Pre-defined schemas for HTTP, Database, and Message Queue logging
-  - Consistent field names across your entire infrastructure
-  - Easy integration with log aggregation tools (ELK, Grafana, etc.)
+## WHY GOSLOGX
 
-- **🎯 Production-Ready**
-  - Thread-safe singleton pattern with `sync.Once`
-  - Compact single-line stack traces for better searchability
-  - Cloud-native severity levels (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-  - **94%+ test coverage**
+goslogx is built around a few deliberate principles:
 
-## 📦 Installation
+- **BACKEND AGNOSTIC** — emit OpenTelemetry and OTLP instead of binding your application to one observability vendor.
+- **MODULAR BY DEFAULT** — install only the integrations your application actually uses.
+- **PRODUCTION-ORIENTED** — provider ownership, batching, sampling, graceful shutdown, masking, privacy defaults, and bounded-cardinality guidance are first-class concerns.
+- **CONTEXT-AWARE** — correlate logs with active spans and preserve trace context across HTTP, databases, Redis, messaging, and workers.
+- **LOW COUPLING** — the core module does not import your web framework, ORM, cache client, or broker.
+- **EXTENSIBLE** — integrations are optional Go modules built around a small `TelemetryProvider` contract.
+
+## FEATURE HIGHLIGHTS
+
+| Capability | What goslogx provides |
+| --- | --- |
+| Structured logging | Zap-based JSON logging with consistent severity and message types |
+| Sensitive-data protection | Struct tags, JSON masking, HTTP header masking, privacy-safe defaults |
+| Distributed tracing | Managed or external OpenTelemetry `TracerProvider`, OTLP/gRPC export, sampling and batching |
+| Metrics | Managed or external `MeterProvider`, custom meters and internal goslogx health metrics |
+| Correlation | `obs_trace_id`, `obs_span_id`, and `obs_trace_flags` on context-aware logs |
+| Propagation | W3C Trace Context and pluggable propagators |
+| Lifecycle | Unified `ForceFlush` and `Shutdown` for goslogx-owned telemetry |
+| Integrations | HTTP, gRPC, databases, Redis, NATS, Kafka, RabbitMQ, and more |
+| Commercial use | MIT licensed; suitable for commercial applications subject to the license terms |
+
+## INSTALLATION
 
 ```bash
 go get github.com/muhammadluth/goslogx
 ```
 
-**Requirements:** Go 1.21+
+Core requires Go 1.24 or later. Some newer plugin modules require Go 1.26. Each plugin is a separate Go module, so installing core does not pull framework, database, cache, or messaging dependencies.
 
-## 🚀 Quick Start
-
-### Basic Usage
+## QUICK START
 
 ```go
 package main
 
-import (
-    "github.com/muhammadluth/goslogx"
-)
+import "github.com/muhammadluth/goslogx"
 
 func main() {
-    // Initialize logger (call once in main)
-    goslogx.New(
-        goslogx.WithServiceName("payment-service"),
+    logger := goslogx.New(
+        goslogx.WithServiceName("payment-api"),
         goslogx.WithMasking(true),
     )
 
-    // Simple logging
-    goslogx.Info(
-        "trace-123",
-        "api-handler",
+    logger.Info(
+        "",
+        "payments",
         goslogx.MESSSAGE_TYPE_EVENT,
-        "user login successful",
-        nil,
+        "payment received",
+        map[string]any{"result": "accepted"},
     )
-
-    // Error logging with stack trace
-    if err := processPayment(); err != nil {
-        goslogx.Error("trace-123", "payment-processor", err)
-    }
 }
 ```
 
-### HTTP Request/Response Logging with Auto-Masking
+`New` keeps the existing singleton behavior: the first call configures the global logger, while package-level helpers reuse the same instance.
+
+## SENSITIVE-DATA MASKING
 
 ```go
-// Automatically masks sensitive fields in JSON body and headers
-goslogx.Info(
-    traceID,
-    "api-gateway",
-    goslogx.MESSSAGE_TYPE_REQUEST,
-    "Incoming request",
-    goslogx.HTTPData{
-        Method:     "POST",
-        URL:        "/api/v1/auth/login",
-        StatusCode: 200,
-        Headers: goslogx.MaskingLogHttpHeaders("headers", map[string][]string{
-            "Authorization": {"Bearer eyJhbGci..."},  // Will be masked: "****"
-            "Content-Type":  {"application/json"},    // Not masked
-            "X-API-Key":     {"sk_live_123456"},      // Partially masked: "sk****56"
-        }),
-        Body: goslogx.MaskingLogJSONBytes("body", []byte(`{
-            "username": "admin@example.com",  // Partially masked: "ad****om"
-            "password": "secret123"           // Fully masked: "****"
-        }`)),
-        Duration: "125ms",
-        ClientIP: "203.0.113.42",
-    },
-)
-```
-
-**Output:**
-```json
-{
-  "level": "info",
-  "time": "2024-01-15T10:30:00Z",
-  "msg": "Incoming request",
-  "application_name": "api-gateway",
-  "trace_id": "trace-123",
-  "module": "api-gateway",
-  "msg_type": "REQUEST",
-  "severity": "INFO",
-  "data": {
-    "method": "POST",
-    "url": "/api/v1/auth/login",
-    "status_code": 200,
-    "headers": {
-      "Authorization": ["****"],
-      "Content-Type": ["application/json"],
-      "X-API-Key": ["sk****56"]
-    },
-    "body": "{\"username\":\"ad****om\",\"password\":\"****\"}",
-    "duration": "125ms",
-    "client_ip": "203.0.113.42"
-  }
-}
-```
-
-### Struct Field Masking
-
-```go
-type User struct {
-    ID       string `json:"id"`
-    Email    string `json:"email" log:"masked:partial"`
-    Password string `json:"password" log:"masked:full"`
-    Name     string `json:"name"`
-}
-
-user := User{
-    ID:       "user-123",
-    Email:    "john.doe@example.com",
-    Password: "supersecret",
-    Name:     "John Doe",
-}
-
-goslogx.Info(traceID, "user-service", goslogx.MESSSAGE_TYPE_EVENT, "user created", user)
-// Email: "jo****om", Password: "****", Name: "John Doe" (unchanged)
-```
-
-### Masking Tags
-
-Struct fields can opt into one of four masking strategies:
-
-| Tag | Use for | Behavior |
-| --- | --- | --- |
-| `log:"masked:full"` | Individual sensitive string fields | Replaces the value with `****`. |
-| `log:"masked:partial"` | Individual identifiable string fields | Keeps the first and last two characters, for example `jo****om`. |
-| `log:"masked:auto"` | Payload fields such as `Body` and `Payload` | Recursively masks nested JSON strings, bytes, maps, structs, pointers, and arrays based on field names. |
-| `log:"masked:headers"` | HTTP headers (`map[string][]string`) | Masks header values based on header names, including `Authorization`, `Cookie`, and API-key headers. |
-
-The DTO fields `HTTPData.Body`, `DBData.Payload`, `MQData.Payload`, and `GenericData.Payload` use `masked:auto`. `HTTPData.Headers` uses `masked:headers`. Payload values are copied while masking, so the original application data is not modified.
-
-```go
-type Event struct {
+type PaymentEvent struct {
     Password string         `json:"password" log:"masked:full"`
     Email    string         `json:"email" log:"masked:partial"`
     Payload  map[string]any `json:"payload" log:"masked:auto"`
-    Headers  map[string][]string `json:"headers" log:"masked:headers"`
 }
 ```
 
-## 🔐 Masking Strategies
-
-### Automatic Field Detection
-
-**Full Masking** (completely hidden as `****`):
-- `password`, `passwd`, `pwd`
-- `secret`, `secret_key`, `api_secret`
-- `token`, `authorization`, `bearer`
-- `credential`, `private_key`
-
-**Partial Masking** (shows first/last 2 characters):
-- `username`, `user_name`, `email`
-- `phone`, `mobile`
-- `api_key`, `access_key`, `client_id`
-
-### Manual Masking Functions
+| Tag | Behavior |
+| --- | --- |
+| `log:"masked:full"` | Replace the field value with `****` |
+| `log:"masked:partial"` | Retain only a small visible prefix/suffix |
+| `log:"masked:auto"` | Recursively mask sensitive payload fields |
+| `log:"masked:headers"` | Mask sensitive HTTP headers |
 
 ```go
-// Mask JSON string
-masked := goslogx.MaskingLogJSONString("data", `{"password":"secret"}`)
-
-// Mask JSON bytes
-masked := goslogx.MaskingLogJSONBytes("body", jsonBytes)
-
-// Mask HTTP headers
-masked := goslogx.MaskingLogHttpHeaders("headers", headerMap)
+maskedJSON := goslogx.MaskingLogJSONString("body", `{"password":"secret"}`)
+maskedBytes := goslogx.MaskingLogJSONBytes("body", jsonBytes)
+maskedHeaders := goslogx.MaskingLogHttpHeaders("headers", headerMap)
 ```
 
-## 📊 Standardized DTOs
+Masking applies to goslogx log data. It does not automatically sanitize arbitrary OpenTelemetry attributes created by application or third-party instrumentation.
 
-### HTTPData
-```go
-goslogx.Info(traceID, "api", goslogx.MESSSAGE_TYPE_REQUEST, "request", goslogx.HTTPData{
-    Method:     "GET",
-    URL:        "/api/v1/users",
-    StatusCode: 200,
-    Headers:    headers,
-    Body:       responseBody,
-    Duration:   "45ms",
-    ClientIP:   "192.168.1.1",
-})
-```
-
-### DBData
-```go
-goslogx.Info(traceID, "database", goslogx.MESSSAGE_TYPE_IN, "query executed", goslogx.DBData{
-    Driver:    "postgres",
-    Operation: "SELECT",
-    Database:  "users_db",
-    Table:     "users",
-    Statement: "SELECT * FROM users WHERE id = $1",
-    Duration:  "12ms",
-})
-```
-
-### MQData
-```go
-goslogx.Info(traceID, "messaging", goslogx.MESSSAGE_TYPE_IN, "message received", goslogx.MQData{
-    Driver:    "kafka",
-    Operation: "consume",
-    Topic:     "user-events",
-    Group:     "notification-service",
-    MessageID: "msg-123",
-    Payload:   eventData,
-})
-```
-
-## ⚡ Performance Benchmarks
-
-Benchmarks run on: `Intel Core i5-12400F @ 2.5GHz, 12 cores`
-
-### Core Logging Operations
-
-| Benchmark | Time/op | Allocs/op | Bytes/op |
-|-----------|---------|-----------|----------|
-| `InfoNoData` | 780 ns | 1 | 24 B |
-| `InfoWithDTO` | 1,946 ns | 8 | 296 B |
-| `InfoWithNestedMasking` | 1,192 ns | 4 | 64 B |
-| `InfoWithSliceMasking` | 1,667 ns | 12 | 288 B |
-| `DebugNoData` | 108 ns | 4 | 184 B |
-| `DebugWithDTO` | 173 ns | 4 | 184 B |
-| `DebugWithNestedMasking` | 188 ns | 4 | 184 B |
-| `DebugWithSliceMasking` | 201 ns | 5 | 208 B |
-| `WarningNoData` | 1,582 ns | 6 | 449 B |
-| `WarningWithDTO` | 3,084 ns | 14 | 770 B |
-| `Error` | 2,041 ns | 7 | 465 B |
-
-### JSON Masking Performance
-
-| Benchmark | Time/op | Allocs/op | Bytes/op |
-|-----------|---------|-----------|----------|
-| `MaskJSONString_Small` (< 100B) | 2,016 ns | 23 | 1,256 B |
-| `MaskJSONString_Medium` (< 1KB) | 8,812 ns | 87 | 4,987 B |
-| `MaskJSONString_Large` (> 1KB) | 17,639 ns | 193 | 9,815 B |
-| `MaskHttpHeaders` | 1,438 ns | 13 | 560 B |
-
-### Struct Masking Performance
-
-| Benchmark | Time/op | Allocs/op | Bytes/op |
-|-----------|---------|-----------|----------|
-| `StructMasking_Flat` | 1,146 ns | 4 | 56 B |
-| `StructMasking_Nested` | 1,243 ns | 5 | 72 B |
-| `StructMasking_Slice` | 1,549 ns | 12 | 240 B |
-
-### HTTPData Logging
-
-| Benchmark | Time/op | Allocs/op | Bytes/op |
-|-----------|---------|-----------|----------|
-| `HTTPData_WithSensitiveData` | 2,151 ns | 10 | 489 B |
-| `HTTPData_WithoutSensitiveData` | 1,850 ns | 8 | 417 B |
-
-**Key Takeaways:**
-- ✅ **Sub-microsecond** logging for simple operations
-- ✅ **Single-digit allocations** for most use cases
-- ✅ **Efficient masking** with minimal overhead (< 2µs for small JSON)
-- ✅ **Scales well** with data size
-
-Run benchmarks yourself:
-```bash
-go test -bench=. -benchmem -benchtime=1s
-```
-
-## 🎯 Configuration Options
+## TRACING AND METRICS
 
 ```go
-goslogx.New(
-    // Set service/application name
-    goslogx.WithServiceName("my-service"),
-    
-    // Enable/disable masking (default: true)
-    goslogx.WithMasking(true),
-    
-    // Set log level (default: Info)
-    goslogx.WithDebug(true),  // Enables Debug level
-    
-    // Custom output writer (default: os.Stdout)
-    goslogx.WithOutput(customWriter),
+logger := goslogx.New(
+    goslogx.WithServiceName("payment-api"),
+
+    goslogx.WithResource(goslogx.ResourceConfig{
+        ServiceVersion:        "1.5.0",
+        DeploymentEnvironment: "production",
+        ServiceInstanceID:     "payment-api-01",
+        ResourceAttributes: map[string]string{
+            "team.name": "payments",
+        },
+    }),
+
+    goslogx.WithTracing(goslogx.TracingConfig{
+        Endpoint:      "collector:4317",
+        SamplingRatio: 0.10,
+    }),
+
+    goslogx.WithMetrics(goslogx.MetricsConfig{
+        Endpoint: "collector:4317",
+    }),
+
+    goslogx.WithInternalMetrics(true),
 )
 ```
 
-## 📖 API Documentation
+Check initialization errors before accepting work:
 
-Full API documentation is available at [pkg.go.dev](https://pkg.go.dev/github.com/muhammadluth/goslogx).
-
-### Core Functions
-
-- `New(...Option)` - Initialize logger with options
-- `Info(traceID, module, msgType, msg, data)` - Log informational messages
-- `Debug(traceID, module, msgType, msg, data)` - Log debug messages
-- `Warning(traceID, module, msg, data)` - Log warnings
-- `Error(traceID, module, err)` - Log errors with stack trace
-- `Fatal(traceID, module, err)` - Log fatal errors and exit
-
-### Masking Functions
-
-- `MaskingLogJSONString(key, jsonStr)` - Mask sensitive fields in JSON string
-- `MaskingLogJSONBytes(key, jsonBytes)` - Mask sensitive fields in JSON bytes
-- `MaskingLogHttpHeaders(key, headers)` - Mask sensitive HTTP headers
-
-## 🧪 Testing
-
-```bash
-# Run tests
-go test ./...
-
-# Run tests with coverage
-go test -cover ./...
-
-# Generate coverage report
-go test -coverprofile=coverage.out ./...
-go tool cover -html=coverage.out
+```go
+if err := errors.Join(
+    logger.TracingError(),
+    logger.MetricsError(),
+); err != nil {
+    return err
+}
 ```
 
-**Current Coverage:** 94.1%
+Create custom spans with native OpenTelemetry options:
 
-## 🤝 Contributing
+```go
+ctx, span := logger.StartSpan(
+    ctx,
+    "payment.process",
+    trace.WithAttributes(
+        attribute.String("payment.type", "debit"),
+    ),
+)
+defer span.End()
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+logger.InfoContext(
+    ctx,
+    "",
+    "payments",
+    goslogx.MESSSAGE_TYPE_EVENT,
+    "payment processed",
+    nil,
+)
+```
 
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+For native APIs:
 
-## 🙏 Acknowledgments
+```go
+tracer := logger.Tracer("payment-service")
+meter  := logger.Meter("payment-service")
+```
 
-- Built on top of [Uber's Zap](https://github.com/uber-go/zap) - blazing fast, structured logging
-- Inspired by production needs in high-scale distributed systems
+Applications may also inject application-owned providers with `WithTracerProvider` and `WithMeterProvider`.
 
-## 📄 License
+## GRACEFUL SHUTDOWN
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+defer cancel()
 
----
+_ = server.Shutdown(ctx)
+_ = logger.ForceFlush(ctx)
+_ = logger.Shutdown(ctx)
+```
 
-**Made with ❤️ for the Go community**
+External providers remain application-owned.
+
+## OPTIONAL INTEGRATIONS
+
+Install only what your application uses:
+
+```bash
+go get github.com/muhammadluth/goslogx/plugins/http/fiber
+go get github.com/muhammadluth/goslogx/plugins/http/std
+go get github.com/muhammadluth/goslogx/plugins/grpc
+
+go get github.com/muhammadluth/goslogx/plugins/database/bun
+go get github.com/muhammadluth/goslogx/plugins/database/pgx
+go get github.com/muhammadluth/goslogx/plugins/database/gorm
+
+go get github.com/muhammadluth/goslogx/plugins/cache/redis
+
+go get github.com/muhammadluth/goslogx/plugins/messaging/nats
+go get github.com/muhammadluth/goslogx/plugins/messaging/kafka/franzgo
+go get github.com/muhammadluth/goslogx/plugins/messaging/rabbitmq
+```
+
+### HTTP
+
+`net/http`, Fiber, Gin, Echo, Chi, Gorilla Mux, httprouter, go-restful, and fasthttp.
+
+### DATABASE
+
+`database/sql`, pgx, Bun, go-pg, sqlx, GORM, Ent, MongoDB, ClickHouse, Cassandra/ScyllaDB, Elasticsearch, OpenSearch, Neo4j, and DynamoDB.
+
+### CACHE
+
+`go-redis` via `github.com/muhammadluth/goslogx/plugins/cache/redis`.
+
+### MESSAGING
+
+NATS Core/JetStream, Kafka via franz-go/kafka-go/IBM Sarama, and RabbitMQ.
+
+## ARCHITECTURE
+
+```text
+                         GOSLOGX CORE
+                ┌─────────────────────────┐
+                │ LOGGING                 │
+                │ TRACING                 │
+                │ METRICS                 │
+                │ RESOURCE                │
+                │ PROPAGATION             │
+                │ LIFECYCLE               │
+                │ TELEMETRY PROVIDER      │
+                └────────────┬────────────┘
+                             │
+              ┌──────────────┼───────────────┐
+              ▼              ▼               ▼
+             HTTP         DATABASE        MESSAGING
+              │              │               │
+          FRAMEWORKS      SQL / ORM      NATS / KAFKA
+                                          / RABBITMQ
+                             │
+                             ▼
+                      OPENTELEMETRY SDK
+                             │
+                            OTLP
+                             │
+                             ▼
+                    OPENTELEMETRY COLLECTOR
+```
+
+See [ARCHITECTURE](docs/architecture/README.md).
+
+## BACKEND AGNOSTIC BY DESIGN
+
+```text
+GOSLOGX → OPENTELEMETRY → OTLP → COLLECTOR → BACKEND
+```
+
+goslogx does not require a vendor-specific observability SDK in application code.
+
+## COMMERCIAL USE
+
+goslogx is distributed under the [MIT LICENSE](LICENSE).
+
+The MIT license permits use, modification, distribution, and inclusion in commercial software subject to its terms and copyright notice requirements.
+
+For production adoption, review version pinning, privacy policy, sampling, retention, dependency compatibility, and operational limits as part of your normal production-readiness process.
+
+## DOCUMENTATION
+
+Start with the [DOCUMENTATION INDEX](docs/README.md).
+
+| Area | Guide |
+| --- | --- |
+| Observability setup | [OBSERVABILITY](docs/guides/observability.md) |
+| Distributed tracing | [TRACING](docs/guides/tracing.md) |
+| Metrics | [METRICS](docs/guides/metrics.md) |
+| Cardinality and privacy | [CARDINALITY AND PRIVACY](docs/guides/cardinality.md) |
+| Production lifecycle | [PRODUCTION](docs/guides/production.md) |
+| Architecture | [ARCHITECTURE](docs/architecture/README.md) |
+| Plugin ecosystem | [INTEGRATIONS](docs/integrations/README.md) |
+| Collector deployment | [OBSERVABILITY PRODUCTION](docs/guides/observability-production.md) |
+
+The public API reference is available on [pkg.go.dev](https://pkg.go.dev/github.com/muhammadluth/goslogx).
+
+## EXAMPLES
+
+```text
+examples/
+├── basic/
+├── full-observability/
+├── http/
+├── database/
+├── cache/
+└── messaging/
+```
+
+The full-observability example demonstrates an end-to-end trace across HTTP, database, Redis, messaging, workers, and outbound HTTP.
+
+## DEVELOPMENT
+
+```bash
+make test-all
+make check-core
+```
+
+Or:
+
+```bash
+bash scripts/test-modules.sh
+BENCHMARKS=1 bash scripts/test-modules.sh
+```
+
+Root `go test ./...` covers the core module only; nested plugins are separate Go modules and must be validated independently.
+
+## LICENSE
+
+goslogx is licensed under the [MIT LICENSE](LICENSE).

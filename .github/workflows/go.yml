@@ -2,31 +2,63 @@ name: Go
 
 on:
   push:
-    branches: ["main"]
+    branches: [main, feat/otel-integration]
   pull_request:
-    branches: ["main"]
 
 jobs:
-  build:
+  modules:
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.discover.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - id: discover
+        shell: python
+        run: |
+          import json, os, pathlib, re
+          modules = []
+          for manifest in sorted(pathlib.Path(".").rglob("go.mod")):
+              module = str(manifest.parent)
+              version = re.search(r"^go ([\d.]+)", manifest.read_text(), re.M).group(1)
+              modules.append({"module": module, "go": version, "name": "core" if module == "." else module.replace("/", "-")})
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("matrix=" + json.dumps({"include": modules}) + "\n")
+  test:
+    needs: modules
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.modules.outputs.matrix) }}
+    defaults:
+      run:
+        working-directory: ${{ matrix.module }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
-
-      - name: Install dependencies
-        run: go mod tidy
-
-      - name: Build
-        run: go build -v ./...
-
+          go-version: ${{ matrix.go }}
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)"
+      - name: Check dependencies
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+      - name: Core dependency isolation
+        if: matrix.module == '.'
+        run: bash scripts/check-core-deps.sh
+      - name: Canonical plugin layout
+        if: matrix.module == '.'
+        run: bash scripts/check-plugin-layout.sh
+      - name: Vet
+        run: go vet ./...
       - name: Test
-        run: go test -v -coverprofile=coverage.txt -covermode=atomic ./...
-
-      - name: Upload coverage reports to Codecov
+        run: go test ./...
+      - name: Race and coverage
+        run: go test -race -coverprofile=coverage.txt -covermode=atomic ./...
+      - name: Upload coverage
         uses: codecov/codecov-action@v5
         with:
+          files: ${{ matrix.module }}/coverage.txt
+          flags: ${{ matrix.name }}
           token: ${{ secrets.CODECOV_TOKEN }}

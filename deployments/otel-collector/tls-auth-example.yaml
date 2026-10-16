@@ -1,0 +1,54 @@
+# Reference overlay for a TLS-secured OTLP receiver with HTTP Basic auth and a
+# TLS-secured backend. Replace all secret/certificate paths before deployment.
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  basicauth/server:
+    htpasswd:
+      file: /run/secrets/collector.htpasswd
+
+receivers:
+  otlp/secure:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+        tls:
+          cert_file: /run/secrets/tls.crt
+          key_file: /run/secrets/tls.key
+          client_ca_file: /run/secrets/client-ca.crt
+        auth:
+          authenticator: basicauth/server
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 75
+    spike_limit_percentage: 20
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+
+exporters:
+  otlp/backend:
+    endpoint: tracing-gateway.example.com:4317
+    headers:
+      authorization: ${env:BACKEND_AUTHORIZATION}
+    tls:
+      insecure: false
+      ca_file: /run/secrets/backend-ca.crt
+      cert_file: /run/secrets/backend-client.crt
+      key_file: /run/secrets/backend-client.key
+    retry_on_failure:
+      enabled: true
+    sending_queue:
+      enabled: true
+      queue_size: 10000
+
+service:
+  extensions: [health_check, basicauth/server]
+  pipelines:
+    traces:
+      receivers: [otlp/secure]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/backend]
+
