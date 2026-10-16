@@ -1,71 +1,149 @@
-# Architecture
+# GOSLOGX ARCHITECTURE
 
-The core module provides structured logging, OpenTelemetry tracing and metrics, shared service resources, propagation, and provider lifecycle management. Optional plugin modules connect those capabilities to application frameworks and clients.
+goslogx separates generic observability capabilities from framework-specific instrumentation.
 
-```text
-Application
-    │
-    ├── goslogx core: logs, traces, metrics, resources, lifecycle
-    │
-    └── optional plugins: HTTP frameworks, SQL/ORM/NoSQL, Redis, messaging
-                  │
-                  ▼
-           OpenTelemetry SDK
-                  │ OTLP/gRPC
-                  ▼
-       OpenTelemetry Collector
-                  │
-                  ▼
-        Your observability backend
-```
+The core owns logging and generic OpenTelemetry lifecycle concerns. Optional plugins adapt those capabilities to HTTP frameworks, databases, caches, messaging systems, and gRPC without pulling those dependencies into every application.
 
-## Core and optional dependencies
-
-Import `github.com/muhammadluth/goslogx` for generic observability. Each integration has its own module under `github.com/muhammadluth/goslogx/plugins/`. Installing the core does not pull framework, database or messaging dependencies.
-
-Plugins accept `TelemetryProvider`, which supplies a tracer provider, meter provider and text-map propagator. They use explicit providers, preserve application context and leave provider shutdown to the owner. See [plugin authoring](../integrations/README.md#author-a-plugin) to build an integration for another library.
-
-## Resources and ownership
-
-`WithResource` configures service identity for both managed signals. `WithTracing` and `WithMetrics` create providers owned by goslogx; `WithTracerProvider` and `WithMeterProvider` accept providers owned by the application. Managed and external configuration for the same signal are mutually exclusive.
-
-Global registration is opt-in. Integrations work with tracing only, metrics only, or explicit no-op providers. Applications own their HTTP servers/transports, database pools and Redis clients. See [observability](../guides/observability.md) for configuration and [production](../guides/production.md) for shutdown order.
-
-## Context across signals
-
-Pass the active request context to each operation:
+## ARCHITECTURE OVERVIEW
 
 ```text
-HTTP request span
-    └── application span
-        ├── context log with obs_trace_id and obs_span_id
-        ├── database span
-        ├── Redis span
-        ├── outbound HTTP span
-        └── message producer
-            └── remote receipt
-                └── message process
-                    └── worker database span
+APPLICATION
+    │
+    ├── GOSLOGX CORE
+    │   ├── structured logging
+    │   ├── sensitive-data masking
+    │   ├── tracing facade
+    │   ├── metrics facade
+    │   ├── resource identity
+    │   ├── propagation
+    │   └── lifecycle
+    │
+    └── OPTIONAL PLUGINS
+        ├── HTTP
+        ├── gRPC
+        ├── database
+        ├── cache
+        └── messaging
+             │
+             ▼
+      OPENTELEMETRY SDK
+             │
+            OTLP
+             │
+             ▼
+   OPENTELEMETRY COLLECTOR
+             │
+             ▼
+    OBSERVABILITY BACKEND
 ```
 
-HTTP plugins extract incoming trace context and inject outgoing context. Database and Redis operations create child spans from the context passed by the application. Custom tracers and meters use stable instrumentation scopes that identify code, rather than requests or users.
+## CORE BOUNDARY
 
-## Export and backend selection
+Core responsibilities include logging, masking, provider management, resource identity, propagation, correlation, flush/shutdown, and OTLP export.
 
-Managed providers export through OTLP/gRPC to a Collector. Configure routing to your chosen backend in the Collector; goslogx does not require a vendor-specific backend SDK. Managed tracing uses batching, and managed metrics use a periodic reader. Applications can supply external providers for other exporter or SDK configurations.
+The core does not import application frameworks, ORMs, cache clients, or messaging clients.
 
-Plugin privacy defaults restrict collected attributes and error details. They do not sanitize arbitrary application-created telemetry. Follow [cardinality and privacy guidance](../guides/cardinality.md) when defining business metrics, span attributes and resource values.
+## TELEMETRY PROVIDER CONTRACT
 
-Messaging adapters inject/extract headers using the provider propagator. See [integration policy](integration-policy.md) for context continuity, bounded destinations and choosing an instrumentation layer. Bun and go-pg use their canonical `plugins/database` paths.
+```go
+type TelemetryProvider interface {
+    TracerProvider() trace.TracerProvider
+    MeterProvider() metric.MeterProvider
+    TextMapPropagator() propagation.TextMapPropagator
+}
+```
 
-## HTTP adapters
+Plugins consume this small public contract rather than logger internals.
 
-The HTTP namespace contains std, Fiber, Gin, Echo, Chi, Gorilla Mux, httprouter, go-restful and fasthttp modules. Native framework adapters configure official OTel middleware where available. Chi and httprouter share otelhttp; fasthttp uses native API instrumentation. Shared HTTP provider/privacy policy keeps framework dependencies out of core. See [HTTP integrations](../integrations/http/README.md) for routes, errors and supported options.
+## PROVIDER OWNERSHIP
 
-## Core telemetry implementation
+### GOSLOGX-OWNED PROVIDERS
 
-The root package is the public facade. `tracing.go`, `metrics.go`, `resource.go`, `propagation.go` and `lifecycle.go` expose configuration and operations without constructing SDK exporters. `telemetry.go` defines the public tracing/metrics capability interfaces. Context logging and span correlation remain in the logging layer.
+`WithTracing(...)` and `WithMetrics(...)` create providers owned by goslogx.
 
-`internal/telemetry/runtime.go` composes managed and external providers. Its resource builder merges shared identity with legacy tracing identity once, then supplies that same resource to both owned providers. Tracing owns exporter, batching, sampling and transport validation; metrics owns exporter, reader and internal metric instruments. The lifecycle coordinator owns synchronization, flushing, shutdown, global registration/restoration and throttled SDK error reporting. Applications and plugins do not import these packages.
+### APPLICATION-OWNED PROVIDERS
 
-Optional plugins use public `goslogx` capabilities. `internal/integration` contains shared integration policies and testkits; plugins consume these private helpers alongside the public core contract. HTTP and gRPC contrib instrumentation live in their nested modules; the core's gRPC transport dependency serves OTLP exporters. Collector templates live under `deployments/otel-collector`. Run `make test-all` for every module or `make check-core` to verify dependency boundaries.
+`WithTracerProvider(...)` and `WithMeterProvider(...)` accept providers owned by the application.
+
+Managed and external configuration for the same signal are mutually exclusive.
+
+## SHARED RESOURCE IDENTITY
+
+`WithResource` defines one service identity shared by managed traces and metrics.
+
+## CONTEXT FLOW
+
+```text
+HTTP SERVER SPAN
+    │
+    └── APPLICATION SPAN
+        ├── GOSLOGX LOG
+        ├── DATABASE SPAN
+        ├── REDIS SPAN
+        ├── HTTP CLIENT SPAN
+        └── MESSAGE PRODUCER
+              ↓
+         REMOTE CONSUMER
+              ↓
+         PROCESS SPAN
+```
+
+## INTERNAL TELEMETRY
+
+```text
+internal/telemetry/
+├── lifecycle/
+├── metrics/
+├── propagation/
+├── resource/
+└── tracing/
+```
+
+## PLUGIN ARCHITECTURE
+
+```text
+plugins/
+├── http/
+├── grpc/
+├── database/
+├── cache/
+└── messaging/
+```
+
+## BACKEND AGNOSTIC DESIGN
+
+```text
+GOSLOGX
+   ↓
+OPENTELEMETRY
+   ↓
+OTLP
+   ↓
+COLLECTOR
+   ├── GRAFANA
+   ├── SIGNOZ
+   └── OTHER BACKENDS
+```
+
+## PRIVACY AND CARDINALITY
+
+Plugins should default to bounded and privacy-safe telemetry. Avoid secrets, request/response bodies, SQL bind parameters, Redis values, message payloads, and high-cardinality identifiers.
+
+## LIFECYCLE
+
+```text
+STOP ACCEPTING WORK
+        ↓
+FORCE FLUSH
+        ↓
+SHUT DOWN METRICS
+        ↓
+SHUT DOWN TRACING
+```
+
+## VALIDATION
+
+```bash
+make test-all
+make check-core
+```
