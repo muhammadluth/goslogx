@@ -1,4 +1,4 @@
-# MongoDB driver v2
+# MONGODB DRIVER V2
 
 ```bash
 go get github.com/muhammadluth/goslogx/plugins/database/mongo
@@ -18,3 +18,11 @@ Install monitors before `mongo.Connect`. The adapter uses [OpenTelemetry contrib
 Command monitoring covers find, insert, update, delete, aggregate and transaction commands. Operation names are bounded; unknown commands become `QUERY`. Command documents, filters, replies, server addresses and raw failures are removed before instrumentation sees them. Only an explicitly configured database name is retained. Pool events track idle and used connections without exporting connection IDs. Existing command or pool monitors are rejected; select or compose your instrumentation explicitly.
 
 Read [privacy and signal options](../../architecture/integration-policy.md) before enabling statement capture or combining instrumentation layers. Providers belong to the application; plugins never shut them down.
+
+## IMPLEMENTATION
+
+This plugin uses the upstream otelmongo command and pool monitors. The supplied goslogx provider owns provider selection; the native client keeps connection, retry, transaction, acknowledgement, and shutdown behavior.
+
+## AUTO-INSTRUMENTATION COEXISTENCE
+
+Use either this plugin or another instrumentation layer for the same client operation. Enabling both can produce duplicate spans, duplicate metrics, incorrect parentage, and extra overhead.

@@ -2,12 +2,15 @@ package std
 
 import (
 	"context"
+	"strings"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
+
+const configuredMetricPrefix = "goslogx.configured."
 
 func safeAttributes(input []attribute.KeyValue) []attribute.KeyValue {
 	output := make([]attribute.KeyValue, 0, len(input))
@@ -71,10 +74,55 @@ func safeMetricAttributes(input []attribute.KeyValue) []attribute.KeyValue {
 	return result
 }
 
+func safeConfiguredMetricAttributes(input []attribute.KeyValue) []attribute.KeyValue {
+	result := make([]attribute.KeyValue, 0, len(input))
+	for _, a := range input {
+		switch a.Key {
+		case "app.channel", "app.region", "app.tier", "service.version", "deployment.environment.name":
+			if a.Value.Type() == attribute.STRING && len(a.Value.AsString()) <= 128 {
+				result = append(result, a)
+			}
+		}
+	}
+	return result
+}
+
+func encodeConfiguredMetricAttributes(input []attribute.KeyValue) []attribute.KeyValue {
+	safe := safeConfiguredMetricAttributes(input)
+	result := make([]attribute.KeyValue, 0, len(safe))
+	for _, a := range safe {
+		result = append(result, attribute.KeyValue{Key: attribute.Key(configuredMetricPrefix + string(a.Key)), Value: a.Value})
+	}
+	return result
+}
+
+func decodeConfiguredMetricAttributes(input []attribute.KeyValue) []attribute.KeyValue {
+	result := make([]attribute.KeyValue, 0, len(input))
+	for _, a := range input {
+		key := string(a.Key)
+		if !strings.HasPrefix(key, configuredMetricPrefix) {
+			continue
+		}
+		result = append(result, attribute.KeyValue{Key: attribute.Key(strings.TrimPrefix(key, configuredMetricPrefix)), Value: a.Value})
+	}
+	return safeConfiguredMetricAttributes(result)
+}
+
+func safeMessageAttributes(input []attribute.KeyValue) []attribute.KeyValue {
+	result := make([]attribute.KeyValue, 0, len(input))
+	for _, a := range input {
+		if (a.Key == "http.read_bytes" || a.Key == "http.wrote_bytes") && a.Value.Type() == attribute.INT64 && a.Value.AsInt64() >= 0 {
+			result = append(result, a)
+		}
+	}
+	return result
+}
+
 type privateTracerProvider struct {
 	trace.TracerProvider
-	route      string
-	attributes []attribute.KeyValue
+	route         string
+	attributes    []attribute.KeyValue
+	messageEvents bool
 }
 
 func (p privateTracerProvider) Tracer(name string, opts ...trace.TracerOption) trace.Tracer {
@@ -110,7 +158,7 @@ func (t privateTracer) Start(ctx context.Context, name string, opts ...trace.Spa
 
 type privateSpan struct {
 	trace.Span
-	provider trace.TracerProvider
+	provider privateTracerProvider
 }
 
 func (s privateSpan) TracerProvider() trace.TracerProvider { return s.provider }
@@ -119,7 +167,13 @@ func (s privateSpan) SetAttributes(attributes ...attribute.KeyValue) {
 }
 func (s privateSpan) SetStatus(code codes.Code, _ string)     { s.Span.SetStatus(code, "") }
 func (s privateSpan) RecordError(error, ...trace.EventOption) {}
-func (s privateSpan) AddEvent(string, ...trace.EventOption)   {}
+func (s privateSpan) AddEvent(name string, opts ...trace.EventOption) {
+	if !s.provider.messageEvents || (name != "read" && name != "write") {
+		return
+	}
+	c := trace.NewEventConfig(opts...)
+	s.Span.AddEvent(name, trace.WithTimestamp(c.Timestamp()), trace.WithAttributes(safeMessageAttributes(c.Attributes())...))
+}
 func (s privateSpan) AddLink(link trace.Link) {
 	s.Span.AddLink(trace.Link{SpanContext: link.SpanContext})
 }
@@ -157,7 +211,8 @@ func (m privateMeter) Float64Histogram(name string, opts ...metric.Float64Histog
 func recordOptions(opts []metric.RecordOption, attributes []attribute.KeyValue) []metric.RecordOption {
 	c := metric.NewRecordConfig(opts)
 	set := c.Attributes()
-	clean := append(safeMetricAttributes(set.ToSlice()), attributes...)
+	clean := append(safeMetricAttributes(set.ToSlice()), decodeConfiguredMetricAttributes(set.ToSlice())...)
+	clean = append(clean, attributes...)
 	return []metric.RecordOption{metric.WithAttributes(clean...)}
 }
 

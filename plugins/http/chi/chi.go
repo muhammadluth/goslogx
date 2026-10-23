@@ -27,7 +27,15 @@ var WithMetrics = httptelemetry.WithMetrics
 var WithSpanStartOptions = httptelemetry.WithSpanStartOptions
 
 var WithPublicEndpoint = httptelemetry.WithPublicEndpoint
+var WithPublicEndpointFn = httptelemetry.WithPublicEndpointFn
 var WithSpanNameFormatter = httptelemetry.WithSpanNameFormatter
+var WithMetricAttributesFn = httptelemetry.WithMetricAttributesFn
+var WithMessageEvents = httptelemetry.WithMessageEvents
+
+const (
+	ReadEvent  = httptelemetry.ReadEvent
+	WriteEvent = httptelemetry.WriteEvent
+)
 
 func Middleware(provider goslogx.TelemetryProvider, opts ...Option) func(http.Handler) http.Handler {
 	c := httptelemetry.NewConfig(opts...)
@@ -59,6 +67,23 @@ func Middleware(provider goslogx.TelemetryProvider, opts ...Option) func(http.Ha
 		options := []base.Option{base.WithRequestFilter(c.Filter)}
 		if c.Public {
 			options = append(options, base.WithPublicEndpoint())
+		} else if c.PublicEndpointFn != nil {
+			options = append(options, base.WithPublicEndpointFn(c.PublicEndpointFn))
+		}
+		if c.MetricAttributesFn != nil {
+			options = append(options, base.WithMetricAttributesFn(c.MetricAttributesFn))
+		}
+		if len(c.MessageEvents) != 0 {
+			events := make([]base.MessageEvent, 0, len(c.MessageEvents))
+			for _, event := range c.MessageEvents {
+				switch event {
+				case httptelemetry.ReadEvent:
+					events = append(events, base.ReadEvent)
+				case httptelemetry.WriteEvent:
+					events = append(events, base.WriteEvent)
+				}
+			}
+			options = append(options, base.WithMessageEvents(events...))
 		}
 		return base.NewHandler(p, observed, "HTTP", options...)
 	}

@@ -1,4 +1,4 @@
-# Tracing
+# TRACING
 
 Keep using `StartTrace(ctx, name)` for a context and an end function. For native OTel span controls, use `StartSpan` or `Tracer`:
 

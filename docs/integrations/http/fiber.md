@@ -1,4 +1,12 @@
-# Fiber v3
+# FIBER V3
+
+## INSTALLATION
+
+```bash
+go get github.com/muhammadluth/goslogx/plugins/http/fiber
+```
+
+## UNDERLYING INSTRUMENTATION
 
 Import `github.com/muhammadluth/goslogx/plugins/http/fiber` as `goslogxfiber`:
 
@@ -11,13 +19,27 @@ app.Get("/payments/:id", func(c fiber.Ctx) error {
 })
 ```
 
-The plugin wraps official `github.com/gofiber/contrib/v3/otel` v1.3.0 and Fiber v3.5.0. `NewMiddleware` remains an alias API. Use `c.Context()` for logs, queries, Redis and outgoing requests. Upstream middleware extracts incoming context, continues the trace, records registered route templates and applies the application error handler before recording status.
+The plugin wraps official `github.com/gofiber/contrib/v3/otel` v1.3.0 and Fiber v3.5.0. Upstream owns spans, metrics, route handling, error semantics, propagation, and response instrumentation. goslogx supplies providers and privacy policy. `NewMiddleware` remains an alias API.
 
-Upstream instruments include `http.server.request.duration`, request/response body sizes and active requests. Private providers remove URL/header/error details while retaining method/status/protocol and template routes. `WithServerName` adds a trusted static server name to spans. `WithRequestFilter` accepts requests to instrument; legacy `WithNext` skips when true. `WithMetricAttributes` accepts fixed environment/version and approved `app.*` labels. `WithPropagator` configures trusted propagation.
+## DEFAULT BEHAVIOR
 
-The plugin requires Go 1.26 due to the supported current upstream generation. Fiber v2 needs a separate adapter. Register middleware before application routes. Run checks inside `plugins/http/fiber`; root `./...` excludes it.
+Tracing and metrics are enabled. Client IP, captured headers, trace response headers, and dynamic attributes are disabled. URL paths/queries, user agents, credentials, cookies, and raw errors are removed. Upstream instruments include request duration, body sizes, and active requests.
 
-## HTTP namespace
+## SUPPORTED OPTIONS
+
+The adapter exposes `WithNext`/`WithRequestFilter`, propagators and response propagators, trace response header, server name and port, span formatter/start options, public endpoint functions, static and request/response callback attributes, header capture, query redaction, client IP, and independent signal controls. `WithoutMetrics` and deprecated `WithCollectClientIP` remain compatibility aliases.
+
+Dynamic metric callbacks accept only bounded approved application/environment/version attributes. Dynamic trace callbacks reject credential-like and transport semantic keys. Authorization, proxy authorization, Cookie, and Set-Cookie cannot be enabled through header capture. `WithClientIP(true)`, caller-controlled headers, and trace response headers are explicit opt-ins.
+
+## PERFORMANCE CONSIDERATIONS
+
+Request and response callbacks run on every request. Header capture copies configured values. Keep callbacks cheap and the selected attributes bounded. Query redaction is retained as defense in depth even though goslogx does not export `url.query`.
+
+## UPSTREAM CAPABILITY DIFFERENCES AND COEXISTENCE
+
+All public upstream v1.3.0 capabilities are represented except provider overrides, which are not applicable. goslogx changes the upstream client-IP default to off. The plugin requires Go 1.26. Fiber v2 needs a separate adapter. Register the middleware once before application routes and do not combine it with direct Fiber OTel middleware.
+
+## HTTP NAMESPACE
 
 `github.com/muhammadluth/goslogx/plugins/http/fiber` contains the Fiber v3 implementation and owns its instrumentation scope. `WithTracing(false)` and `WithMetrics(false)` control signals independently. Explicit `WithTraceAttributes`, `WithSpanStartOptions`, `WithSpanNameFormatter` and `WithPublicEndpoint` options complement native route/error behavior. Safe static metric labels also accept `app.channel`, `app.region` and `app.tier`.
 

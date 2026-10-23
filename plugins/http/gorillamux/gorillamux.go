@@ -2,10 +2,13 @@
 package gorillamux
 
 import (
+	"net/http"
+
 	"github.com/gorilla/mux"
 	"github.com/muhammadluth/goslogx"
 	"github.com/muhammadluth/goslogx/internal/integration/httptelemetry"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gorilla/mux/otelmux"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 const ScopeName = "github.com/muhammadluth/goslogx/plugins/http/gorillamux"
@@ -23,7 +26,9 @@ var WithTracing = httptelemetry.WithTracing
 var WithMetrics = httptelemetry.WithMetrics
 
 var WithPublicEndpoint = httptelemetry.WithPublicEndpoint
+var WithPublicEndpointFn = httptelemetry.WithPublicEndpointFn
 var WithSpanNameFormatter = httptelemetry.WithSpanNameFormatter
+var WithMetricAttributesFn = httptelemetry.WithMetricAttributesFn
 
 func Middleware(provider goslogx.TelemetryProvider, opts ...Option) mux.MiddlewareFunc {
 	c := httptelemetry.NewConfig(opts...)
@@ -34,9 +39,16 @@ func Middleware(provider goslogx.TelemetryProvider, opts ...Option) mux.Middlewa
 	}
 	if c.Public {
 		upstream = append(upstream, otelmux.WithPublicEndpoint())
+	} else if c.PublicEndpointFn != nil {
+		upstream = append(upstream, otelmux.WithPublicEndpointFn(c.PublicEndpointFn))
 	}
 	if c.SpanName != nil {
 		upstream = append(upstream, otelmux.WithSpanNameFormatter(c.SpanName))
+	}
+	if c.MetricAttributesFn != nil {
+		upstream = append(upstream, otelmux.WithMetricAttributesFn(func(r *http.Request) []attribute.KeyValue {
+			return httptelemetry.EncodeMetricAttributes(c.MetricAttributesFn(r))
+		}))
 	}
 	return otelmux.Middleware(c.ServerName, upstream...)
 }

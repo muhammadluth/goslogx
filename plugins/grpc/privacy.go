@@ -37,6 +37,36 @@ func clean(input []attribute.KeyValue, c config) []attribute.KeyValue {
 	return out
 }
 
+func safeMetricAttributes(input []attribute.KeyValue) []attribute.KeyValue {
+	out := make([]attribute.KeyValue, 0, len(input))
+	for _, a := range input {
+		switch a.Key {
+		case "app.channel", "service.version", "deployment.environment.name":
+			if a.Value.Type() == attribute.STRING && len(a.Value.AsString()) <= 128 {
+				out = append(out, a)
+			}
+		}
+	}
+	return out
+}
+
+func safeMessageAttributes(input []attribute.KeyValue) []attribute.KeyValue {
+	out := make([]attribute.KeyValue, 0, len(input))
+	for _, a := range input {
+		switch a.Key {
+		case "rpc.message.type":
+			if a.Value.Type() == attribute.STRING && (a.Value.AsString() == "SENT" || a.Value.AsString() == "RECEIVED") {
+				out = append(out, a)
+			}
+		case "rpc.message.id", "rpc.message.compressed_size", "rpc.message.uncompressed_size":
+			if a.Value.Type() == attribute.INT64 && a.Value.AsInt64() >= 0 {
+				out = append(out, a)
+			}
+		}
+	}
+	return out
+}
+
 type privateTP struct {
 	trace.TracerProvider
 	c config
@@ -83,7 +113,13 @@ func (s privateSpan) RecordError(err error, _ ...trace.EventOption) {
 		s.Span.SetAttributes(attribute.String("error.type", "grpc_error"))
 	}
 }
-func (s privateSpan) AddEvent(string, ...trace.EventOption) {}
+func (s privateSpan) AddEvent(name string, opts ...trace.EventOption) {
+	if name != "message" || len(s.p.c.messageEvents) == 0 {
+		return
+	}
+	c := trace.NewEventConfig(opts...)
+	s.Span.AddEvent("message", trace.WithTimestamp(c.Timestamp()), trace.WithAttributes(safeMessageAttributes(c.Attributes())...))
+}
 func (s privateSpan) AddLink(link trace.Link) {
 	s.Span.AddLink(trace.Link{SpanContext: link.SpanContext})
 }
@@ -119,7 +155,8 @@ func (m privateMeter) Int64Histogram(name string, opts ...metric.Int64HistogramO
 func metricOptions(opts []metric.RecordOption, c config) []metric.RecordOption {
 	cfg := metric.NewRecordConfig(opts)
 	set := cfg.Attributes()
-	a := append(clean(set.ToSlice(), c), c.metricAttrs...)
+	a := append(clean(set.ToSlice(), c), safeMetricAttributes(set.ToSlice())...)
+	a = append(a, c.metricAttrs...)
 	return []metric.RecordOption{metric.WithAttributes(a...)}
 }
 

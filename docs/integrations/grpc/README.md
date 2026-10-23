@@ -1,10 +1,14 @@
-# gRPC
+# GRPC
+
+## INSTALLATION
 
 ```bash
-go get github.com/muhammadluth/goslogx/plugins/grpc
+go get github.com/muhammadluthfi/goslogx/plugins/grpc
 ```
 
-Use the official OpenTelemetry stats handlers through the plugin. This optional module requires Go 1.24 and leaves server, connection, credentials and interceptor ownership with the application.
+## UNDERLYING INSTRUMENTATION
+
+The plugin wraps the official `otelgrpc` v0.66.0 stats handlers. `otelgrpc` owns RPC spans, status semantics, message events, propagation, and RPC metrics. goslogx supplies providers, privacy-safe attributes, stable method naming, and signal controls.
 
 ```go
 server := grpc.NewServer(grpc.StatsHandler(
@@ -17,10 +21,43 @@ conn, err := grpc.NewClient(target,
         goslogxgrpc.WithMethodNames("/orders.v1.Orders/Create"))))
 ```
 
-The handlers supply explicit tracer/meter providers and the provider's propagator to `otelgrpc`. They create client/server spans and RPC metrics, propagate W3C context through gRPC metadata and retain native status/error behavior. Unary and streaming events follow the native stats-handler lifecycle. Pass the active context to calls, and use the server handler's context for `InfoContext` and downstream work; `obs_trace_id` and `obs_span_id` correlate logs.
+## DEFAULT BEHAVIOR
 
-Default span names are `gRPC`; raw service/method metadata is omitted. `WithMethodNames` opts up to 64 registered full methods (at most 256 bytes each) into stable span names and metric dimensions. Do not derive this list from requests. Status codes remain bounded. Payloads, metadata, endpoints and raw error messages/events are excluded. Native errors and responses remain available to callers.
+Tracing and metrics are enabled. W3C context uses the supplied provider propagator. Default span names are `gRPC`; raw service and method metadata are omitted until registered with `WithMethodNames`. Status codes remain bounded. Payloads, metadata, endpoints, and raw error descriptions are excluded.
 
-`WithFilter` accepts `*stats.RPCTagInfo`; false bypasses telemetry. `WithTracing(false)` and `WithMetrics(false)` independently disable signals. `WithPropagator` overrides propagation; configure a TraceContext/Baggage composite explicitly if needed. `WithPublicEndpoint` applies to server spans, starting a new root with a remote link. Explicit trace attributes stay span-only. Static metric attributes accept `app.channel`, `service.version` and `deployment.environment.name` string values up to 128 bytes.
+## SUPPORTED OPTIONS
 
-Install one stats instrumentation layer. Choose this plugin or automatic/other gRPC instrumentation to avoid duplicate spans and metrics; no external agent detection is attempted. Providers remain application-owned. Normal tests use an in-memory gRPC transport and in-memory OTel providers, without a Collector.
+| Capability | goslogx option | Classification | Default |
+| --- | --- | --- | --- |
+| Tracing | `WithTracing` | Pass through | on |
+| Metrics | `WithMetrics` | Pass through | on |
+| Propagation | `WithPropagator` | Safe wrapper | provider propagator |
+| RPC filter | `WithFilter` | Pass through | all RPCs |
+| Public endpoint | `WithPublicEndpoint` | Pass through | off |
+| Conditional public endpoint | `WithPublicEndpointFn` | Pass through | unset |
+| Message-size events | `WithMessageEvents` | Disabled by default | off |
+| Span kind | `WithSpanKind` | Pass through | upstream client/server kind |
+| Static span attributes | `WithTraceAttributes`, `WithSpanAttributes` | Safe wrapper | none |
+| Static metric attributes | `WithMetricAttributes` | Safe wrapper | none |
+| Dynamic metric attributes | `WithMetricAttributesFn` | Safe wrapper | unset |
+| Stable service/method names | `WithMethodNames` | goslogx policy | none |
+
+`WithMethodNames` accepts at most 64 registered full methods of at most 256 bytes each. Metric attributes accept bounded `app.channel`, `service.version`, and `deployment.environment.name` strings. Dynamic attributes pass through the same validation.
+
+Tracer and meter provider overrides are not supported because goslogx owns provider selection. The deprecated upstream interceptor filter and span-options APIs are not applicable to the stats-handler integration.
+
+## PRIVACY DEFAULTS
+
+Message events are disabled. When enabled, they contain only direction, sequence ID, compressed size, and uncompressed size. Message payloads are never recorded. Arbitrary request metadata is not captured.
+
+## PERFORMANCE CONSIDERATIONS
+
+`WithMessageEvents` emits an event for each selected inbound or outbound message, so event volume grows with streaming traffic. Dynamic metric attribute functions run once per RPC and should remain cheap and bounded.
+
+## UPSTREAM CAPABILITY DIFFERENCES
+
+All relevant v0.66.0 stats-handler options are represented. `WithSpanOptions` is intentionally absent because upstream documents it as deprecated and unused by `NewClientHandler` and `NewServerHandler`. Provider overrides remain under goslogx ownership.
+
+## AUTO-INSTRUMENTATION COEXISTENCE
+
+Install one stats handler per client or server. Do not combine this plugin with another gRPC stats handler that creates OpenTelemetry RPC spans or metrics for the same operation.

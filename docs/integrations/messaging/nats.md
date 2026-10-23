@@ -1,4 +1,4 @@
-# NATS Core and JetStream
+# NATS CORE AND JETSTREAM
 
 ```bash
 go get github.com/muhammadluth/goslogx/plugins/messaging/nats
@@ -36,3 +36,7 @@ return batch.Error()
 Shared messaging duration/count/error metrics accompany spans. JetStream metadata supplies a redelivery counter. `ObserveConsumer(ctx, info)` records a caller-refreshed ConsumerInfo snapshot: pending, ack pending and lag (pending + ack pending). It starts no polling goroutine and calls no broker API itself. These NATS-specific metrics use the `messaging.nats.*` namespace, without raw subject or consumer IDs. Fetch's initial span excludes asynchronous waiting/iteration; Process covers actual work.
 
 See [privacy, propagation and coexistence](../../architecture/integration-policy.md) and the [distributed example](../../../examples/full-observability/README.md).
+
+## LIFECYCLE
+
+The application owns subscriptions, acknowledgements, JetStream consumers, and NATS connections. Drain or close them before flushing and shutting down the telemetry provider so final producer and consumer operations can export.

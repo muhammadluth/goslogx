@@ -12,6 +12,7 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	goredis "github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
@@ -237,6 +238,181 @@ func TestNoGlobalFallback(t *testing.T) {
 	if len(data.ScopeMetrics) != 0 {
 		t.Fatal("used global metrics")
 	}
+}
+
+func TestCapabilityParityOptions(t *testing.T) {
+	t.Run("enriched tracing", func(t *testing.T) {
+		server := miniredis.RunT(t)
+		client := goredis.NewClient(&goredis.Options{Addr: server.Addr()})
+		defer client.Close()
+		p, recorder, _ := telemetry(t)
+		if err := Instrument(client, p,
+			WithMetrics(false),
+			WithDBStatement(true),
+			WithCallerEnabled(true),
+			WithAttributes(attribute.String("deployment.environment.name", "test")),
+		); err != nil {
+			t.Fatal(err)
+		}
+		if err := client.Set(context.Background(), "visible-key", "visible-value", 0).Err(); err != nil {
+			t.Fatal(err)
+		}
+		var command sdktrace.ReadOnlySpan
+		for _, span := range recorder.Ended() {
+			if span.Name() == "redis.command" {
+				command = span
+			}
+		}
+		if command == nil {
+			t.Fatal("missing command span")
+		}
+		attrs := spanAttributes(command)
+		if got := attrs["db.statement"]; !strings.Contains(got, "visible-key") || !strings.Contains(got, "visible-value") {
+			t.Fatalf("statement option not preserved: %q", got)
+		}
+		if attrs["code.function"] == "" || attrs["code.filepath"] == "" || attrs["code.lineno"] == "" {
+			t.Fatalf("caller option not preserved: %v", attrs)
+		}
+		if attrs["deployment.environment.name"] != "test" {
+			t.Fatalf("custom attribute not preserved: %v", attrs)
+		}
+	})
+
+	t.Run("filters", func(t *testing.T) {
+		server := miniredis.RunT(t)
+		client := goredis.NewClient(&goredis.Options{Addr: server.Addr()})
+		defer client.Close()
+		p, recorder, _ := telemetry(t)
+		if err := Instrument(client, p,
+			WithMetrics(false),
+			WithDialFilter(true),
+			WithCommandFilter(func(cmd goredis.Cmder) bool { return cmd.Name() == "get" }),
+			WithCommandsFilter(func([]goredis.Cmder) bool { return true }),
+		); err != nil {
+			t.Fatal(err)
+		}
+		ctx := context.Background()
+		if err := client.Set(ctx, "key", "value", 0).Err(); err != nil {
+			t.Fatal(err)
+		}
+		for _, span := range recorder.Ended() {
+			if span.Name() == "redis.dial" {
+				t.Fatal("dial filter did not suppress dial span")
+			}
+		}
+		recorder.Reset()
+		if err := client.Get(ctx, "key").Err(); err != nil {
+			t.Fatal(err)
+		}
+		if spans := recorder.Ended(); len(spans) != 0 {
+			t.Fatalf("command filter produced %d spans", len(spans))
+		}
+		recorder.Reset()
+		if _, err := client.Pipelined(ctx, func(pipe goredis.Pipeliner) error {
+			pipe.Get(ctx, "key")
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		for _, span := range recorder.Ended() {
+			if span.Name() == "redis.pipeline" {
+				t.Fatal("pipeline filter did not suppress pipeline span")
+			}
+		}
+	})
+
+	t.Run("signal modes", func(t *testing.T) {
+		for _, tc := range []struct {
+			name       string
+			tracing    bool
+			metrics    bool
+			wantSpans  bool
+			wantMetric bool
+		}{
+			{name: "tracing only", tracing: true, metrics: false, wantSpans: true},
+			{name: "metrics only", tracing: false, metrics: true, wantMetric: true},
+			{name: "disabled", tracing: false, metrics: false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				server := miniredis.RunT(t)
+				client := goredis.NewClient(&goredis.Options{Addr: server.Addr()})
+				defer client.Close()
+				p, recorder, reader := telemetry(t)
+				closeChan := make(chan struct{})
+				defer close(closeChan)
+				if err := Instrument(client, p, WithTracing(tc.tracing), WithMetrics(tc.metrics), WithCloseChan(closeChan), WithPoolName("primary")); err != nil {
+					t.Fatal(err)
+				}
+				if err := client.Ping(context.Background()).Err(); err != nil {
+					t.Fatal(err)
+				}
+				if got := len(recorder.Ended()) > 0; got != tc.wantSpans {
+					t.Fatalf("spans=%v want %v", got, tc.wantSpans)
+				}
+				var data metricdata.ResourceMetrics
+				if err := reader.Collect(context.Background(), &data); err != nil {
+					t.Fatal(err)
+				}
+				if got := len(data.ScopeMetrics) > 0; got != tc.wantMetric {
+					t.Fatalf("metrics=%v want %v", got, tc.wantMetric)
+				}
+			})
+		}
+	})
+}
+
+func TestAttributePrivacyValidation(t *testing.T) {
+	attrs := safeConfiguredAttributes([]attribute.KeyValue{
+		attribute.String("service.namespace", "payments"),
+		attribute.String("auth.token", "secret"),
+		attribute.String("db.statement", "SET key value"),
+	})
+	if len(attrs) != 1 || attrs[0].Key != "service.namespace" {
+		t.Fatalf("unexpected safe attributes: %v", attrs)
+	}
+}
+
+func TestConfigurationAndPrivateSpanControls(t *testing.T) {
+	c := defaultConfig()
+	called := false
+	for _, option := range []Option{
+		WithDBSystem("redis-cluster"), WithSemConvCompliantMetrics(false),
+		WithErrorHandler(func(error) { called = true }),
+	} {
+		option(&c)
+	}
+	if c.dbSystem != "redis-cluster" || c.semConvCompliantMetrics || c.onError == nil {
+		t.Fatalf("configuration options were not retained: %#v", c)
+	}
+	c.onError(errors.New("node initialization"))
+	if !called {
+		t.Fatal("error handler was not retained")
+	}
+
+	p, recorder, _ := telemetry(t)
+	policy := privacyPolicy{dbSystem: "redis", custom: map[attribute.Key]struct{}{attribute.Key("service.namespace"): {}}}
+	_, span := (privateTracerProvider{TracerProvider: p.tp, policy: policy}).Tracer("upstream").Start(context.Background(), "SET key secret", trace.WithAttributes(attribute.String("service.namespace", "payments")))
+	if span.TracerProvider() == nil {
+		t.Fatal("private span provider missing")
+	}
+	span.SetName("redis.pipeline GET secret")
+	span.SetAttributes(attribute.String("password", "SECRET"), attribute.String("service.namespace", "payments"))
+	span.RecordError(errors.New("SECRET"))
+	span.AddEvent("SECRET")
+	span.AddLink(trace.Link{SpanContext: trace.NewSpanContext(trace.SpanContextConfig{TraceID: trace.TraceID{1}, SpanID: trace.SpanID{1}})})
+	span.End()
+	spans := recorder.Ended()
+	if len(spans) != 1 || spans[0].Name() != "redis.pipeline" || strings.Contains(fmt.Sprint(spans[0]), "SECRET") {
+		t.Fatalf("private span leaked or retained an unsafe name: %#v", spans)
+	}
+}
+
+func spanAttributes(span sdktrace.ReadOnlySpan) map[string]string {
+	result := make(map[string]string, len(span.Attributes()))
+	for _, attr := range span.Attributes() {
+		result[string(attr.Key)] = attr.Value.Emit()
+	}
+	return result
 }
 
 type unsupported struct{ goredis.UniversalClient }

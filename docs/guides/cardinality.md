@@ -1,4 +1,4 @@
-# Cardinality and privacy
+# CARDINALITY AND PRIVACY
 
 Metric dimensions must have bounded values. Use fixed routes such as `/payments/:id`, known HTTP methods/statuses, configured database namespaces and enumerated business results. Resource identity belongs on the resource.
 

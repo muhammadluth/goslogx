@@ -1,8 +1,8 @@
-# Production
+# PRODUCTION
 
 Initialize goslogx once, check `TracingError` and `MetricsError`, then attach plugins before starting workers or serving traffic. Use explicit providers with auto-instrumentation and multiple SDKs; leave global registration disabled unless a library requires it. Choose bounded sampling, batch/queue sizes and export deadlines for your workload.
 
-Send both signals to an OTLP Collector. Configure backend routing, credentials, queues and retries there. SDK exporter headers and TLS certificates belong in secret management. Existing [deployment examples](../../deployments/otel-collector/README.md) and the [production operations guide](observability-production.md) cover Collector infrastructure and application-owned providers.
+Send both signals to an OTLP Collector. Configure backend routing, credentials, queues and retries there. SDK exporter headers and TLS certificates belong in secret management. Existing [deployment examples](../../deployments/otel-collector/README.md) and the [production operations guide](../operations/production.md) cover Collector infrastructure and application-owned providers.
 
 Stop accepting work before shutdown:
 

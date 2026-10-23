@@ -1,4 +1,4 @@
-# OpenSearch
+# OPENSEARCH
 
 ```bash
 go get github.com/muhammadluth/goslogx/plugins/database/opensearch

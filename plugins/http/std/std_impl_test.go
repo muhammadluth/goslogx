@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"strings"
 	"testing"
 	"time"
@@ -511,8 +512,62 @@ func TestServeMuxPatternAndNestedWrapper(t *testing.T) {
 		t.Fatal("missing ServeMux template", attrs)
 	}
 	data := collect(t, reader)
-	if !strings.Contains(fmt.Sprint(data), "GET /users/{id}") {
+	if !strings.Contains(fmt.Sprint(data), "/users/{id}") {
 		t.Fatal("missing metric template")
 	}
 	checkPrivacy(t, spans, data)
+}
+
+func TestUpstreamCapabilityOptions(t *testing.T) {
+	t.Run("message events and dynamic metrics", func(t *testing.T) {
+		p, recorder, reader := setup(t)
+		h := NewHandler(p, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.ReadAll(r.Body)
+			_, _ = w.Write([]byte("response"))
+		}), "HTTP", WithMessageEvents(ReadEvent, WriteEvent), WithMetricAttributesFn(func(*http.Request) []attribute.KeyValue {
+			return []attribute.KeyValue{attribute.String("app.channel", "mobile"), attribute.String("app.user_id", "SECRET")}
+		}))
+		req := httptest.NewRequest("POST", "http://localhost/upload", strings.NewReader("request"))
+		h.ServeHTTP(httptest.NewRecorder(), req)
+		spans := recorder.Ended()
+		if len(spans) != 1 || len(spans[0].Events()) < 2 {
+			t.Fatalf("message events not preserved: %v", spans)
+		}
+		for _, event := range spans[0].Events() {
+			if event.Name != "read" && event.Name != "write" {
+				t.Fatalf("unexpected event %q", event.Name)
+			}
+			for _, a := range event.Attributes {
+				if a.Key != "http.read_bytes" && a.Key != "http.wrote_bytes" {
+					t.Fatalf("unsafe event attribute %q", a.Key)
+				}
+			}
+		}
+		metrics := fmt.Sprint(collect(t, reader))
+		if !strings.Contains(metrics, "mobile") || strings.Contains(metrics, "SECRET") {
+			t.Fatalf("dynamic metric attributes not filtered: %s", metrics)
+		}
+	})
+
+	t.Run("client trace", func(t *testing.T) {
+		p, _, _ := setup(t)
+		called := false
+		base := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if clientTrace := httptrace.ContextClientTrace(r.Context()); clientTrace != nil && clientTrace.GotConn != nil {
+				clientTrace.GotConn(httptrace.GotConnInfo{})
+			}
+			return &http.Response{StatusCode: 204, Header: make(http.Header), Body: http.NoBody, Request: r}, nil
+		})
+		transport := NewTransport(p, base, WithClientTrace(func(context.Context) *httptrace.ClientTrace {
+			return &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { called = true }}
+		}))
+		response, err := transport.RoundTrip(httptest.NewRequest("GET", "http://localhost/", nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if !called {
+			t.Fatal("client trace callback not installed")
+		}
+	})
 }

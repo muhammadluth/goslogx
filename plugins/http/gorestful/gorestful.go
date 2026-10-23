@@ -23,6 +23,7 @@ var WithMetrics = httptelemetry.WithMetrics
 var WithSpanStartOptions = httptelemetry.WithSpanStartOptions
 
 var WithPublicEndpoint = httptelemetry.WithPublicEndpoint
+var WithPublicEndpointFn = httptelemetry.WithPublicEndpointFn
 
 // NewFilter returns construction errors from metric creation to the caller.
 func NewFilter(provider goslogx.TelemetryProvider, opts ...Option) (restful.FilterFunction, error) {
@@ -35,6 +36,8 @@ func NewFilter(provider goslogx.TelemetryProvider, opts ...Option) (restful.Filt
 	upstream := []otelrestful.Option{otelrestful.WithTracerProvider(p.TP), otelrestful.WithPropagators(p.Prop)}
 	if c.Public {
 		upstream = append(upstream, otelrestful.WithPublicEndpoint())
+	} else if c.PublicEndpointFn != nil {
+		upstream = append(upstream, otelrestful.WithPublicEndpointFn(c.PublicEndpointFn))
 	}
 	filter := otelrestful.OTelFilter(c.ServerName, upstream...)
 	return func(req *restful.Request, resp *restful.Response, chain *restful.FilterChain) {

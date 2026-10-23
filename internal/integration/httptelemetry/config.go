@@ -15,9 +15,19 @@ import (
 )
 
 type Option func(*Config)
+type MessageEvent int
+
+const (
+	ReadEvent MessageEvent = iota
+	WriteEvent
+)
+
 type Config struct {
 	ServerName                               string
 	Filter                                   func(*http.Request) bool
+	PublicEndpointFn                         func(*http.Request) bool
+	MetricAttributesFn                       func(*http.Request) []attribute.KeyValue
+	MessageEvents                            []MessageEvent
 	SpanName                                 func(string, *http.Request) string
 	TraceAttributes, MetricAttributes        []attribute.KeyValue
 	Start                                    []trace.SpanStartOption
@@ -42,6 +52,16 @@ func WithServerName(s string) Option {
 	}
 }
 func WithFilter(f func(*http.Request) bool) Option { return func(c *Config) { c.Filter = f } }
+func WithPublicEndpointFn(f func(*http.Request) bool) Option {
+	return func(c *Config) { c.PublicEndpointFn = f }
+}
+func WithMetricAttributesFn(f func(*http.Request) []attribute.KeyValue) Option {
+	return func(c *Config) { c.MetricAttributesFn = f }
+}
+func WithMessageEvents(events ...MessageEvent) Option {
+	copy := append([]MessageEvent(nil), events...)
+	return func(c *Config) { c.MessageEvents = append(c.MessageEvents, copy...) }
+}
 func WithSpanNameFormatter(f func(string, *http.Request) string) Option {
 	return func(c *Config) { c.SpanName = f }
 }

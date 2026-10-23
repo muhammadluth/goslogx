@@ -1,4 +1,4 @@
-# HTTP integrations
+# HTTP INTEGRATIONS
 
 Each adapter is an optional nested module. Core imports no HTTP framework. Pass a `goslogx.TelemetryProvider`; tracer, meter and propagator capabilities are resolved explicitly with no-op fallbacks. Providers remain application-owned. A single integration instance can serve concurrent requests.
 
@@ -16,7 +16,7 @@ Each adapter is an optional nested module. Core imports no HTTP framework. Pass 
 
 The standard HTTP module supports Go 1.24; framework adapters require Go 1.26. The canonical HTTP paths are `plugins/http/std` and `plugins/http/fiber`. Fiber implementation and instrumentation scope live in the latter. There is no unsafe reflection between Fiber generations. Fiber v3 is supported; a v2 adapter is not included.
 
-## Options and context
+## OPTIONS AND CONTEXT
 
 Use `WithServerName` for a static server address/name, `WithRequestFilter` (or `WithFilter` on new adapters) to bypass telemetry, `WithTraceAttributes` for explicit span attributes, and `WithMetricAttributes` for safe static labels. Gin also accepts `WithServiceName` as an alias for its server name. Do not pass request-derived hostnames or identifiers as configuration.
 
@@ -35,7 +35,7 @@ Formatter signatures follow the native framework or `(template, *http.Request)` 
 
 Read the active context from `r.Context()` for net/http routers, `c.Request.Context()` for Gin, `c.Request().Context()` for Echo, `c.Context()` for Fiber v3, and `goslogxfast.Context(c)` for fasthttp. Pass that context to database, Redis, messaging and HTTP clients. `InfoContext` correlates logs through `obs_trace_id` and `obs_span_id`; the legacy `trace_id` argument keeps its existing application correlation meaning.
 
-## Routes and generic fallback
+## ROUTES AND GENERIC FALLBACK
 
 Only registered templates become `http.route` dimensions. ServeMux uses `Request.Pattern`, including a method prefix such as `GET /users/{id}`. Chi resolves nested templates after dispatch. Gin/Echo/Mux/go-restful use native matched-route metadata. httprouter and fasthttp require static registration templates. Unmatched routes omit a route when no template is available; dynamic paths never become a fallback dimension.
 
@@ -49,13 +49,13 @@ This provides tracing, propagation and metrics but cannot infer every router's t
 
 `NewTransport` wraps your base transport; nil selects `http.DefaultTransport` without modifying it. `InstrumentClient` returns a shallow copy preserving transport settings, timeout, redirect policy and cookie jar. Consume and close response bodies normally so client spans end.
 
-## Errors and recovery
+## ERRORS AND RECOVERY
 
 5xx responses mark server failure; ordinary 4xx responses do not automatically mark an application error. Explicit framework errors can mark failure independently of status. Framework/application handlers retain response ownership. Echo dispatches its configured error handler once before recording the final response; see its guide for handled-error return semantics. Fiber retains its native error handler behavior.
 
 Place recovery inside instrumentation when telemetry must observe the recovered response: telemetry should enter first and finish after recovery. Middleware outside tracing can change status after a span has already ended. fasthttp's adapter marks a panic and rethrows it; it does not replace your recovery policy. Native client/transport failures retain their original errors while telemetry strips raw error text.
 
-## Automatic instrumentation and tests
+## AUTOMATIC INSTRUMENTATION AND TESTS
 
 Use manual goslogx HTTP instrumentation **or** external automatic instrumentation for the same operation. Runtime, compile-time, eBPF and Auto SDK tools may overlap. Disable the manual signals they own or omit middleware; understand both trace and metric ownership before combining them. No global span state or reflection-based agent detection is used. The standard adapter recognizes its own nested server wrapper via request context, but cannot identify every external instrumentation source.
 

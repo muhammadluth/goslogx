@@ -93,7 +93,7 @@ func Contract(t *testing.T, scope, route string, build Builder) {
 			}
 			data := p.Collect(t)
 			text := fmt.Sprint(data)
-			if !strings.Contains(text, "http.server.request.duration") || !strings.Contains(text, route) || !strings.Contains(text, "mobile") {
+			if !strings.Contains(text, "http.server.request.duration") || !strings.Contains(text, metricRoute(route)) || !strings.Contains(text, "mobile") {
 				t.Fatal("missing route/custom HTTP metrics", text)
 			}
 			p.AssertPrivate(t, "SECRET")
@@ -123,6 +123,13 @@ func Contract(t *testing.T, scope, route string, build Builder) {
 		h := build(nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) }), false, false)
 		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/users/SECRET", nil))
 	})
+}
+
+func metricRoute(pattern string) string {
+	if _, route, ok := strings.Cut(pattern, " "); ok && strings.HasPrefix(route, "/") {
+		return route
+	}
+	return pattern
 }
 
 type withPropagator struct {

@@ -11,16 +11,61 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
 func TestHTTPContract(t *testing.T) {
 	testkit.Contract(t, ScopeName, "/users/:id", func(p goslogx.TelemetryProvider, next http.Handler, filtered, disabled bool) http.Handler {
-		options := []Option{WithMetricAttributes(attribute.String("app.channel", "mobile")), WithTracing(!disabled), WithMetrics(!disabled), WithRequestFilter(func(*http.Request) bool { return !filtered })}
+		options := []Option{
+			WithServiceName("users-api"), WithTraceAttributes(attribute.String("app.component", "handler")),
+			WithMetricAttributes(attribute.String("app.channel", "mobile")),
+			WithMetricAttributesFn(func(*http.Request) []attribute.KeyValue {
+				return []attribute.KeyValue{attribute.String("app.tier", "edge")}
+			}),
+			WithEchoMetricAttributesFn(func(echo.Context) []attribute.KeyValue {
+				return []attribute.KeyValue{attribute.String("app.region", "apac")}
+			}),
+			WithSkipper(func(echo.Context) bool { return false }), WithOnError(func(echo.Context, error) {}),
+			WithTracing(!disabled), WithMetrics(!disabled), WithRequestFilter(func(*http.Request) bool { return !filtered }),
+		}
 		r := echo.New()
 		r.Use(Middleware(p, options...))
 		r.GET("/users/:id", func(c echo.Context) error { next.ServeHTTP(c.Response(), c.Request()); return nil })
 		return r
+	})
+}
+
+func TestEchoSpecificCapabilityOptions(t *testing.T) {
+	t.Run("skipper", func(t *testing.T) {
+		p := fixture.New(t)
+		called := false
+		e := echo.New()
+		e.Use(Middleware(p, WithSkipper(func(echo.Context) bool { return true })))
+		e.GET("/skip", func(c echo.Context) error { called = true; return c.NoContent(204) })
+		e.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/skip", nil))
+		if !called || len(p.Recorder.Ended()) != 0 || len(p.Collect(t).ScopeMetrics) != 0 {
+			t.Fatal("skipper parity")
+		}
+	})
+
+	t.Run("dynamic metric attributes", func(t *testing.T) {
+		p := fixture.New(t)
+		e := echo.New()
+		e.Use(Middleware(p,
+			WithMetricAttributeFn(func(*http.Request) []attribute.KeyValue {
+				return []attribute.KeyValue{attribute.String("app.region", "apac"), attribute.String("app.user_id", "SECRET")}
+			}),
+			WithEchoMetricAttributeFn(func(echo.Context) []attribute.KeyValue {
+				return []attribute.KeyValue{attribute.String("app.channel", "mobile")}
+			}),
+		))
+		e.GET("/metrics", func(c echo.Context) error { return c.NoContent(204) })
+		e.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/metrics", nil))
+		data := fmt.Sprint(p.Collect(t))
+		if !strings.Contains(data, "apac") || !strings.Contains(data, "mobile") || strings.Contains(data, "SECRET") {
+			t.Fatalf("dynamic attributes not preserved safely: %s", data)
+		}
 	})
 }
 

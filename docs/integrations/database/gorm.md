@@ -17,3 +17,11 @@ The adapter configures the maintained [GORM OpenTelemetry plugin](https://github
 Use an uninstrumented SQL pool underneath this plugin. Alternatively, select SQL-only instrumentation and omit this plugin. Registration rejects an existing GORM OpenTelemetry plugin. GORM's application SQL logger is configured separately; this plugin does not change what that logger prints.
 
 Read [privacy and signal options](../../architecture/integration-policy.md) before enabling statement capture or combining instrumentation layers. Providers belong to the application; plugins never shut them down.
+
+## IMPLEMENTATION
+
+This plugin uses the upstream GORM OpenTelemetry plugin. The supplied goslogx provider owns provider selection; the native client keeps connection, retry, transaction, acknowledgement, and shutdown behavior.
+
+## AUTO-INSTRUMENTATION COEXISTENCE
+
+Use either this plugin or another instrumentation layer for the same client operation. Enabling both can produce duplicate spans, duplicate metrics, incorrect parentage, and extra overhead.

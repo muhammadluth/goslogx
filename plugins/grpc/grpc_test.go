@@ -65,7 +65,9 @@ func TestRPCPropagationMetricsErrorsAndLogs(t *testing.T) {
 	prop := propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{})
 	var logs bytes.Buffer
 	logger := goslogx.New(goslogx.WithOutput(&logs), goslogx.WithTracerProvider(p.TP), goslogx.WithMeterProvider(p.MP))
-	client := grpc_health_v1.NewHealthClient(connect(t, logger, &healthService{logger: logger, t: t}, WithPropagator(prop), WithMethodNames(grpc_health_v1.Health_Check_FullMethodName), WithMetricAttributes(attribute.String("app.channel", "mobile"))))
+	client := grpc_health_v1.NewHealthClient(connect(t, logger, &healthService{logger: logger, t: t}, WithPropagator(prop), WithMethodNames(grpc_health_v1.Health_Check_FullMethodName), WithMetricAttributesFn(func(context.Context) []attribute.KeyValue {
+		return []attribute.KeyValue{attribute.String("app.channel", "mobile"), attribute.String("app.user_id", "SECRET")}
+	})))
 	ctx, parent := p.TP.Tracer("app").Start(context.Background(), "request")
 	member, _ := baggage.NewMember("region", "test")
 	bag, _ := baggage.New(member)
@@ -174,12 +176,42 @@ func TestDisabledAndFilteredHandlers(t *testing.T) {
 		t.Fatal("nil provider handlers")
 	}
 }
+
+func TestOptionConfigurationAndPrivateTelemetry(t *testing.T) {
+	c := config{}
+	publicFn := func(context.Context, *stats.RPCTagInfo) bool { return false }
+	for _, option := range []Option{
+		WithPublicEndpoint(), WithPublicEndpointFn(publicFn), WithSpanKind(trace.SpanKindInternal), WithMessageEvents(SentEvent),
+		WithTraceAttributes(attribute.String("app.component", "health")),
+		WithSpanAttributes(attribute.String("app.operation", "check")),
+		WithMetricAttributes(attribute.String("app.channel", "mobile"), attribute.String("app.user", "SECRET")),
+	} {
+		option(&c)
+	}
+	if !c.public || c.publicFn == nil || !c.spanKindSet || len(c.traceAttrs) != 2 || len(c.metricAttrs) != 1 {
+		t.Fatalf("options were not retained safely: %#v", c)
+	}
+	p := testkit.New(t)
+	c.methods = map[string]bool{"grpc.health.v1.Health/Check": true}
+	_, span := (privateTP{TracerProvider: p.TP, c: c}).Tracer("ignored").Start(context.Background(), "/grpc.health.v1.Health/Check", trace.WithAttributes(attribute.String("rpc.service", "grpc.health.v1.Health"), attribute.String("rpc.method", "Check")))
+	if span.TracerProvider() == nil {
+		t.Fatal("private tracer provider missing")
+	}
+	span.RecordError(fmt.Errorf("SECRET"))
+	span.AddEvent("message", trace.WithAttributes(attribute.String("rpc.message.type", "SENT"), attribute.String("rpc.message.payload", "SECRET")))
+	span.AddLink(trace.Link{SpanContext: trace.NewSpanContext(trace.SpanContextConfig{TraceID: trace.TraceID{1}, SpanID: trace.SpanID{1}})})
+	span.End()
+	spans := p.Recorder.Ended()
+	if len(spans) != 1 || spans[0].Name() != "grpc.health.v1.Health/Check" || strings.Contains(fmt.Sprint(spans[0]), "SECRET") {
+		t.Fatalf("private telemetry leaked or changed span: %#v", spans)
+	}
+}
 func (s *healthService) Watch(_ *grpc_health_v1.HealthCheckRequest, stream native.ServerStreamingServer[grpc_health_v1.HealthCheckResponse]) error {
 	return stream.Send(&grpc_health_v1.HealthCheckResponse{Status: grpc_health_v1.HealthCheckResponse_SERVING})
 }
 func TestStreamingStatsLifecycle(t *testing.T) {
 	p := testkit.New(t)
-	conn := connect(t, p, &healthService{})
+	conn := connect(t, p, &healthService{}, WithMessageEvents(ReceivedEvent, SentEvent))
 	stream, err := grpc_health_v1.NewHealthClient(conn).Watch(context.Background(), &grpc_health_v1.HealthCheckRequest{})
 	if err != nil {
 		t.Fatal(err)
@@ -196,6 +228,21 @@ func TestStreamingStatsLifecycle(t *testing.T) {
 	}
 	if len(p.Recorder.Ended()) != 2 {
 		t.Fatal("missing streaming client/server spans")
+	}
+	for _, span := range p.Recorder.Ended() {
+		if len(span.Events()) == 0 {
+			t.Fatal("message events not preserved")
+		}
+		for _, event := range span.Events() {
+			if event.Name != "message" {
+				t.Fatalf("unexpected event %q", event.Name)
+			}
+			for _, attr := range event.Attributes {
+				if attr.Key != "rpc.message.type" && attr.Key != "rpc.message.id" && attr.Key != "rpc.message.compressed_size" && attr.Key != "rpc.message.uncompressed_size" {
+					t.Fatalf("unsafe message attribute %q", attr.Key)
+				}
+			}
+		}
 	}
 	p.AssertPrivate(t, "SECRET")
 }

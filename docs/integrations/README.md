@@ -14,6 +14,8 @@ Then install only what your application uses.
 
 ## HTTP INTEGRATIONS
 
+See the [HTTP integration index](http/README.md) for installation and framework-specific usage.
+
 ```text
 plugins/http/
 ├── std
@@ -32,6 +34,8 @@ plugins/http/
 Client/server instrumentation through explicit goslogx providers.
 
 ## DATABASE INTEGRATIONS
+
+See the [database integration index](database/README.md) for implementation type, privacy, and construction guidance.
 
 ```text
 plugins/database/
@@ -58,6 +62,8 @@ plugins/cache/redis
 ```
 
 ## MESSAGING INTEGRATIONS
+
+See the [messaging integration index](messaging/README.md) for producer, consumer, propagation, and delivery guidance.
 
 ```text
 plugins/messaging/

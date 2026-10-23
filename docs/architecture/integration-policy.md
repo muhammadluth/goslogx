@@ -1,8 +1,8 @@
-# Integration privacy and instrumentation layers
+# INTEGRATION PRIVACY AND INSTRUMENTATION LAYERS
 
 New database and messaging modules use the supplied `goslogx.TelemetryProvider`. They never install global providers. Missing tracer/meter capabilities resolve to explicit no-ops. Configure once before concurrent use. Providers and clients belong to the application; close clients before flushing and shutting down owned providers.
 
-## Choose the instrumentation layer
+## CHOOSE THE INSTRUMENTATION LAYER
 
 Choose manual goslogx instrumentation **or** automatic instrumentation for a given library. Runtime, compile-time, eBPF and Auto SDK instrumentation can overlap with manual plugins. Enabling both can duplicate spans, propagation and metrics. This includes SQL drivers, Redis, MongoDB, Kafka, RabbitMQ and Cassandra; actual automatic coverage depends on the agent and version you deploy.
 
@@ -10,7 +10,7 @@ The new database and messaging modules expose `WithTracing(false)` and `WithMetr
 
 ORM and SQL instrumentation are also separate layers. For GORM or Ent, select their plugin or the underlying SQL plugin. sqlx deliberately uses only SQL instrumentation. Rewrapping and existing hooks are rejected where detection is reliable; opaque SDK option functions and external agents cannot be detected reliably. There are no runtime heuristics.
 
-## Database privacy
+## DATABASE PRIVACY
 
 Statements default off. No integration records bind arguments, documents, items, Cypher parameters, request bodies or credentials. Database operation names come from a finite allowlist. `WithDBName` is an application-supplied static namespace, limited to 128 bytes; do not derive it from a request or tenant ID.
 
@@ -27,7 +27,7 @@ Capture is rejected without a sanitizer. Sanitizer output is trusted and truncat
 
 Errors retain their original identity for callers. Telemetry records generic `error.type` values and error status without raw exception messages or stack traces. Database duration histograms carry error dimensions; they do not require a separate redundant error counter. SQL's maintained upstream instrumentation supplies its own DBStats/operation metrics. HTTP-based search adapters use HTTP metrics.
 
-## Messaging privacy and cardinality
+## MESSAGING PRIVACY AND CARDINALITY
 
 Headers adapt to OpenTelemetry `propagation.TextMapCarrier`; the provider's propagator handles W3C Trace Context and optional baggage. Configure a composite TraceContext/Baggage propagator on the provider when baggage is needed. Baggage travels over the network and may be sensitive; plugins do not turn it into metric labels.
 

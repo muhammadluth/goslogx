@@ -1,4 +1,4 @@
-# Metrics
+# METRICS
 
 `WithMetrics(MetricsConfig{Endpoint: "collector:4317"})` creates an OTLP/gRPC exporter, PeriodicReader and logger-owned MeterProvider. The reader exports every minute by default; set `ExportInterval` and `ExportTimeout` to bound exports. TLS, mTLS, headers, gzip compression and opt-in global registration follow tracing configuration. Use TLS in production. `WithMetrics` clones header maps and TLS settings.
 
@@ -18,4 +18,4 @@ Package-level `Meter` uses the global logger. Empty names use the goslogx scope.
 
 Enable `WithInternalMetrics(true)` to retain `goslogx.log.records`, `goslogx.telemetry.errors`, force-flush duration/errors, and shutdown duration/errors. Internal health metrics use fixed severity/operation/result labels and remain separate from plugin/application metrics. Lifecycle observations occur after each call; the final shutdown observation cannot export through a provider that has closed.
 
-HTTP plugins use upstream instruments, with no duplicate goslogx HTTP metrics. DB plugins record `db.client.operation.duration` in seconds (histogram count supplies operation/error counts) and `db.client.connection.count` by idle/used state. Redis uses upstream redisotel duration and pool instruments; its pinned upstream package retains legacy metric names. See each integration guide for details.
+HTTP plugins preserve upstream instruments where available; the shared goslogx metric layer fills framework gaps without creating a second request span. Database plugins record only the instruments documented by their individual guides. Redis uses upstream redisotel duration and pool instruments. See each integration guide for exact names and supported signal modes.

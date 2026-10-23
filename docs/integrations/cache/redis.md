@@ -1,22 +1,63 @@
-# go-redis v9
+# GO-REDIS V9
 
-Import `github.com/muhammadluth/goslogx/plugins/cache/redis` as `goslogxredis`:
+## INSTALLATION
+
+```bash
+go get github.com/muhammadluth/goslogx/plugins/cache/redis
+```
+
+## UNDERLYING INSTRUMENTATION
+
+This plugin wraps `github.com/redis/go-redis/extra/redisotel/v9` v9.23.0. `redisotel` owns command, pipeline, dial-span, error, and pool-metric semantics. goslogx supplies providers, a stable scope, lifecycle options, and privacy policy.
 
 ```go
 closeMetrics := make(chan struct{})
 if err := goslogxredis.Instrument(client, logger,
     goslogxredis.WithCloseChan(closeMetrics),
-); err != nil { return err }
-value, err := client.Get(ctx, "inventory").Result()
-// During application shutdown:
-_ = client.Close()
-close(closeMetrics)
+); err != nil {
+    return err
+}
+defer close(closeMetrics)
 ```
 
-The official redisotel v9.23.0 hook supports Client, ClusterClient, Ring and UniversalClient values holding these concrete clients. Register once before concurrent use, and before the first operation for ClusterClient. The adapter instruments existing Ring shards plus future nodes. `WithErrorHandler` receives asynchronous initialization errors from future Ring nodes; supply a concurrency-safe handler if your meter can reject instrument creation. Providers stay explicit, including tracing-only/metrics-only and no-op modes. Redis commands continue the active context; pipelines create a bounded pipeline span. `redis.Nil` represents a missing key and does not set error status.
+The hook supports Client, ClusterClient, Ring, and UniversalClient values holding those concrete clients. Register it once before concurrent use. Existing and future Ring shards are instrumented; `WithErrorHandler` receives asynchronous initialization errors from future nodes.
 
-The private tracer boundary uses fixed command/pipeline/dial names, disables statements/caller capture, and omits keys, values, arguments, server addresses and raw error events/descriptions. Metrics use a fixed `pool.name=redis` and upstream fixed status/state dimensions. The integration does not expose statement or key capture.
+## DEFAULT BEHAVIOR
 
-Upstream instruments retain names such as `db.client.connections.use_time` and `.create_time` (milliseconds), `.usage`, `.max`, idle limits, waits/wait duration, timeouts, hits and misses. Failed operations use the bounded status label in duration measurements. `WithSemConvCompliantMetrics(true)` selects monotonic instruments for cumulative pool totals; metric names remain upstream legacy names.
+Tracing and metrics are enabled. Command, pipeline, and dial span names are bounded. Keys, values, arguments, server addresses, caller information, statements, and raw error descriptions are omitted. `AUTH` and `HELLO AUTH` use the upstream default filter. `redis.Nil` is not marked as an error. Metrics use `pool.name=redis` and semantic-convention-compliant cumulative counters.
 
-CloseChan releases upstream metric callback registrations. Without it, callbacks live until the provider shuts down. Go 1.26 is required by the pinned upstream dependencies.
+## SUPPORTED OPTIONS
+
+| Option | Classification | Default | Notes |
+| --- | --- | --- | --- |
+| `WithTracing` | Pass through | `true` | Enables upstream tracing hooks. |
+| `WithMetrics` | Pass through | `true` | Enables upstream pool metrics. |
+| `WithDBSystem` | Safe wrapper | `redis` | Blank values fall back to `redis`. |
+| `WithAttributes` | Safe wrapper | none | Static attributes; sensitive-looking keys are rejected. Keep values bounded because they also reach metrics. |
+| `WithPoolName` | Safe wrapper | `redis` | Blank values fall back to `redis`. Keep the value bounded. |
+| `WithDBStatement` | Disabled by default | `false` | Raw command capture can expose keys and values. |
+| `WithCallerEnabled` | Disabled by default | `false` | Adds runtime stack discovery and source attributes. |
+| `WithCommandFilter` | Safe wrapper | upstream default | Returning `true` skips the command span. The AUTH safety filter always remains active. |
+| `WithCommandsFilter` | Safe wrapper | upstream default | Returning `true` skips the pipeline span. Pipelines containing authentication commands always remain filtered. |
+| `WithDialFilter` | Pass through | `false` | Follows redisotel semantics: `true` suppresses dial spans. |
+| `WithCloseChan` | Pass through | `nil` | Releases upstream metric callback registrations when closed. |
+| `WithSemConvCompliantMetrics` | Pass through | `true` | Set `false` only for legacy UpDownCounter compatibility. |
+| `WithErrorHandler` | goslogx lifecycle | `nil` | Reports asynchronous Ring-node initialization failures. |
+
+Tracer and meter provider overrides are deliberately unavailable. Providers always come from the supplied `goslogx.TelemetryProvider`.
+
+## PRIVACY DEFAULTS
+
+Statement and caller capture are disabled. Enabling statement capture can record Redis keys and values. Custom attribute names are validated, but applications remain responsible for bounded, non-sensitive values.
+
+## PERFORMANCE CONSIDERATIONS
+
+Caller capture performs runtime stack discovery for every observed command or pipeline. Statement capture formats commands. Both remain opt-in. Metrics register callbacks; close `WithCloseChan` during shutdown when the meter provider outlives the Redis client.
+
+## UPSTREAM CAPABILITY DIFFERENCES
+
+All public redisotel v9.23.0 configuration capabilities are represented. Provider overrides are not applicable because goslogx owns provider selection. goslogx additionally normalizes span names and removes raw error details while preserving error status.
+
+## AUTO-INSTRUMENTATION COEXISTENCE
+
+Do not call `redisotel.InstrumentTracing` or `redisotel.InstrumentMetrics` directly on a client already instrumented by goslogx. Installing both produces duplicate hooks and duplicate telemetry.

@@ -1,4 +1,4 @@
-# Full observability
+# FULL OBSERVABILITY
 
 This nested module runs Fiber → payment.process → Bun → Redis → NATS → outbound HTTP, plus a worker that consumes the event and continues the trace through Bun with goslogx logs, traces and metrics. The unit test adds an instrumented remote HTTP server and checks every parent span plus log correlation, metric presence and secret exclusion. It uses sqlmock, miniredis, a real in-process NATS server and in-memory OTel providers, with no Collector or external database.
 
@@ -14,3 +14,32 @@ The default inventory URL is `http://localhost:8081/health`. Managed trace and m
 Go 1.26 is required by Fiber/Redis. Local replace directives resolve the unreleased modules in this checkout; use published core and plugin versions when installing outside this checkout.
 
 The executable uses independent producer and worker NATS connections. The worker extracts trace context from headers, logs inside the process span and performs `SELECT 1` as a schema-free stand-in for a database update. `TestMessagingDistributedTopology` uses an UPDATE and checks producer → remote receipt → process → database parentage, shared trace IDs, correlated worker logs, emitted metrics and excluded secrets. Native NATS Core delivery is ephemeral; use JetStream with application-controlled acknowledgements when durable processing is required.
+
+## REQUIREMENTS
+
+For `go run .`, start PostgreSQL, Redis, NATS, an inventory HTTP endpoint, and an OTLP/gRPC Collector. Unit tests start in-process substitutes and need no external services.
+
+## ENVIRONMENT VARIABLES
+
+`POSTGRES_DSN`, `REDIS_ADDR`, `NATS_URL`, `INVENTORY_URL`, and `OTEL_ENDPOINT` override the localhost defaults described above.
+
+## HOW TO RUN
+
+```bash
+cd examples/full-observability
+go run .
+```
+
+## HOW TO GENERATE TRAFFIC
+
+```bash
+curl -X POST http://localhost:8080/payments
+```
+
+## EXPECTED TELEMETRY AND VERIFICATION
+
+Expect one distributed trace spanning Fiber, application work, Bun, Redis, NATS, the worker, and outbound HTTP; correlated logs; and HTTP, database, Redis, messaging, and internal metrics. Run `go test -race ./...` for deterministic assertions.
+
+## HOW TO SHUT IT DOWN
+
+Send `SIGINT` or `SIGTERM`. The executable stops work, closes clients, flushes telemetry, and shuts down managed providers.

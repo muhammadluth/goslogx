@@ -1,4 +1,4 @@
-# RabbitMQ AMQP 0-9-1
+# RABBITMQ AMQP 0-9-1
 
 ```bash
 go get github.com/muhammadluth/goslogx/plugins/messaging/rabbitmq
@@ -31,3 +31,11 @@ Publish injects a cloned `amqp.Table` while preserving body, properties, reply-t
 Shared messaging metrics capture successful send/receive counts, operation/process durations and bounded error dimensions. Redelivery and successful settlement counters are available. A `multiple` settlement counts one API call, not an inferred number of broker messages. Native publisher confirms/mandatory returns remain application responsibilities; a successful Publish call does not imply a broker confirmation. The adapter adds no management HTTP API, broker polling, reconnect or retry behavior.
 
 Routing keys default to omission. `WithRoutingKeyNormalizer` can add a normalized routing key to producer spans only; keys are never metric dimensions. Queue/exchange names use `WithDestinationNormalizer` and its bounded destination budget. See [privacy, propagation and coexistence](../../architecture/integration-policy.md).
+
+## IMPLEMENTATION
+
+This plugin uses an amqp091-go channel wrapper. The supplied goslogx provider owns provider selection; the native client keeps connection, retry, transaction, acknowledgement, and shutdown behavior.
+
+## AUTO-INSTRUMENTATION COEXISTENCE
+
+Use either this plugin or another instrumentation layer for the same client operation. Enabling both can produce duplicate spans, duplicate metrics, incorrect parentage, and extra overhead.
