@@ -372,6 +372,41 @@ func TestAttributePrivacyValidation(t *testing.T) {
 	}
 }
 
+func TestConfigurationAndPrivateSpanControls(t *testing.T) {
+	c := defaultConfig()
+	called := false
+	for _, option := range []Option{
+		WithDBSystem("redis-cluster"), WithSemConvCompliantMetrics(false),
+		WithErrorHandler(func(error) { called = true }),
+	} {
+		option(&c)
+	}
+	if c.dbSystem != "redis-cluster" || c.semConvCompliantMetrics || c.onError == nil {
+		t.Fatalf("configuration options were not retained: %#v", c)
+	}
+	c.onError(errors.New("node initialization"))
+	if !called {
+		t.Fatal("error handler was not retained")
+	}
+
+	p, recorder, _ := telemetry(t)
+	policy := privacyPolicy{dbSystem: "redis", custom: map[attribute.Key]struct{}{attribute.Key("service.namespace"): {}}}
+	_, span := (privateTracerProvider{TracerProvider: p.tp, policy: policy}).Tracer("upstream").Start(context.Background(), "SET key secret", trace.WithAttributes(attribute.String("service.namespace", "payments")))
+	if span.TracerProvider() == nil {
+		t.Fatal("private span provider missing")
+	}
+	span.SetName("redis.pipeline GET secret")
+	span.SetAttributes(attribute.String("password", "SECRET"), attribute.String("service.namespace", "payments"))
+	span.RecordError(errors.New("SECRET"))
+	span.AddEvent("SECRET")
+	span.AddLink(trace.Link{SpanContext: trace.NewSpanContext(trace.SpanContextConfig{TraceID: trace.TraceID{1}, SpanID: trace.SpanID{1}})})
+	span.End()
+	spans := recorder.Ended()
+	if len(spans) != 1 || spans[0].Name() != "redis.pipeline" || strings.Contains(fmt.Sprint(spans[0]), "SECRET") {
+		t.Fatalf("private span leaked or retained an unsafe name: %#v", spans)
+	}
+}
+
 func spanAttributes(span sdktrace.ReadOnlySpan) map[string]string {
 	result := make(map[string]string, len(span.Attributes()))
 	for _, attr := range span.Attributes() {

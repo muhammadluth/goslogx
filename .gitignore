@@ -23,6 +23,7 @@
 *.out
 *.coverprofile
 coverage.*
+!scripts/coverage.sh
 profile.cov
 *.prof
 *.pprof

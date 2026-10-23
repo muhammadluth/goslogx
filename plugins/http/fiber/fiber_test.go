@@ -171,10 +171,17 @@ func TestUpstreamCapabilityOptions(t *testing.T) {
 	publicCalls := 0
 	app := fiber.New()
 	app.Use(Middleware(p,
+		WithPropagator(propagation.TraceContext{}),
+		WithNext(func(fiber.Ctx) bool { return false }),
 		WithTraceResponseHeader("X-Trace-ID"),
 		WithPort(8443),
+		WithTraceAttributes(attribute.String("app.component", "handler")),
+		WithSpanStartOptions(trace.WithAttributes(attribute.String("app.start", "safe"))),
+		WithSpanNameFormatter(func(fiber.Ctx) string { return "GET /capabilities" }),
+		WithPublicEndpoint(),
 		WithPublicEndpointFn(func(fiber.Ctx) bool { publicCalls++; return false }),
 		WithResponsePropagator(propagation.TraceContext{}),
+		WithRedactedQueryParams("token"),
 		WithCustomAttributes(func(fiber.Ctx) []attribute.KeyValue {
 			return []attribute.KeyValue{attribute.String("app.request", "safe"), attribute.String("auth.token", "SECRET")}
 		}),
@@ -189,7 +196,8 @@ func TestUpstreamCapabilityOptions(t *testing.T) {
 		}),
 		WithCapturedRequestHeaders("X-Request-ID", "Authorization", "Cookie"),
 		WithCapturedResponseHeaders("X-Result", "Set-Cookie"),
-		WithClientIP(true),
+		WithCollectClientIP(true),
+		WithoutMetrics(false),
 	))
 	app.Get("/capabilities", func(c fiber.Ctx) error {
 		c.Set("X-Result", "ok")

@@ -176,6 +176,36 @@ func TestDisabledAndFilteredHandlers(t *testing.T) {
 		t.Fatal("nil provider handlers")
 	}
 }
+
+func TestOptionConfigurationAndPrivateTelemetry(t *testing.T) {
+	c := config{}
+	publicFn := func(context.Context, *stats.RPCTagInfo) bool { return false }
+	for _, option := range []Option{
+		WithPublicEndpoint(), WithPublicEndpointFn(publicFn), WithSpanKind(trace.SpanKindInternal), WithMessageEvents(SentEvent),
+		WithTraceAttributes(attribute.String("app.component", "health")),
+		WithSpanAttributes(attribute.String("app.operation", "check")),
+		WithMetricAttributes(attribute.String("app.channel", "mobile"), attribute.String("app.user", "SECRET")),
+	} {
+		option(&c)
+	}
+	if !c.public || c.publicFn == nil || !c.spanKindSet || len(c.traceAttrs) != 2 || len(c.metricAttrs) != 1 {
+		t.Fatalf("options were not retained safely: %#v", c)
+	}
+	p := testkit.New(t)
+	c.methods = map[string]bool{"grpc.health.v1.Health/Check": true}
+	_, span := (privateTP{TracerProvider: p.TP, c: c}).Tracer("ignored").Start(context.Background(), "/grpc.health.v1.Health/Check", trace.WithAttributes(attribute.String("rpc.service", "grpc.health.v1.Health"), attribute.String("rpc.method", "Check")))
+	if span.TracerProvider() == nil {
+		t.Fatal("private tracer provider missing")
+	}
+	span.RecordError(fmt.Errorf("SECRET"))
+	span.AddEvent("message", trace.WithAttributes(attribute.String("rpc.message.type", "SENT"), attribute.String("rpc.message.payload", "SECRET")))
+	span.AddLink(trace.Link{SpanContext: trace.NewSpanContext(trace.SpanContextConfig{TraceID: trace.TraceID{1}, SpanID: trace.SpanID{1}})})
+	span.End()
+	spans := p.Recorder.Ended()
+	if len(spans) != 1 || spans[0].Name() != "grpc.health.v1.Health/Check" || strings.Contains(fmt.Sprint(spans[0]), "SECRET") {
+		t.Fatalf("private telemetry leaked or changed span: %#v", spans)
+	}
+}
 func (s *healthService) Watch(_ *grpc_health_v1.HealthCheckRequest, stream native.ServerStreamingServer[grpc_health_v1.HealthCheckResponse]) error {
 	return stream.Send(&grpc_health_v1.HealthCheckResponse{Status: grpc_health_v1.HealthCheckResponse_SERVING})
 }
