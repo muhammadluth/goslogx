@@ -1,4 +1,12 @@
-# Bun
+# BUN
+
+## INSTALLATION
+
+```bash
+go get github.com/muhammadluth/goslogx/plugins/database/bun
+```
+
+## QUICK START
 
 Import `github.com/muhammadluth/goslogx/plugins/database/bun` as `goslogxbun`:
 
@@ -14,3 +22,11 @@ Use `WithPoolName` to distinguish pools with fixed names (default `bun`). Regist
 Metrics include `db.client.operation.duration` in seconds and `db.client.connection.count` by idle/used state. Histogram counts provide operation/error counts. Pool callbacks use the explicit meter and no background plugin goroutine; match database and meter-provider lifetimes.
 
 The integration uses a public Bun QueryHook with explicit providers and excludes query text and raw errors. Keep Bun and dialect module versions identical; this integration uses v1.2.18 for both.
+
+## IMPLEMENTATION
+
+This plugin uses Bun QueryHook with the OpenTelemetry API. The supplied goslogx provider owns provider selection; the native client keeps connection, retry, transaction, acknowledgement, and shutdown behavior.
+
+## AUTO-INSTRUMENTATION COEXISTENCE
+
+Use either this plugin or another instrumentation layer for the same client operation. Enabling both can produce duplicate spans, duplicate metrics, incorrect parentage, and extra overhead.

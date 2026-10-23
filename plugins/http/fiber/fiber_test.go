@@ -123,7 +123,7 @@ func TestTelemetry(t *testing.T) {
 			t.Fatal(s.Status())
 		}
 		if s.Status().Description != "" || len(s.Events()) != 0 || strings.Contains(fmt.Sprint(s.Attributes()), "SECRET") {
-			t.Fatal("span privacy")
+			t.Fatal("span privacy", s.Attributes(), s.Events(), s.Status())
 		}
 	}
 	if calls != 3 || len(r.Ended()) != 4 {
@@ -163,6 +163,70 @@ func TestTelemetry(t *testing.T) {
 		default:
 			t.Fatalf("unreviewed metric %T", m.Data)
 		}
+	}
+}
+
+func TestUpstreamCapabilityOptions(t *testing.T) {
+	p, recorder, reader := setup(t)
+	publicCalls := 0
+	app := fiber.New()
+	app.Use(Middleware(p,
+		WithTraceResponseHeader("X-Trace-ID"),
+		WithPort(8443),
+		WithPublicEndpointFn(func(fiber.Ctx) bool { publicCalls++; return false }),
+		WithResponsePropagator(propagation.TraceContext{}),
+		WithCustomAttributes(func(fiber.Ctx) []attribute.KeyValue {
+			return []attribute.KeyValue{attribute.String("app.request", "safe"), attribute.String("auth.token", "SECRET")}
+		}),
+		WithCustomResponseAttributes(func(fiber.Ctx) []attribute.KeyValue {
+			return []attribute.KeyValue{attribute.String("app.response", "safe")}
+		}),
+		WithCustomMetricAttributes(func(fiber.Ctx) []attribute.KeyValue {
+			return []attribute.KeyValue{attribute.String("app.channel", "mobile"), attribute.String("app.user_id", "SECRET")}
+		}),
+		WithCustomResponseMetricAttributes(func(fiber.Ctx) []attribute.KeyValue {
+			return []attribute.KeyValue{attribute.String("app.region", "apac")}
+		}),
+		WithCapturedRequestHeaders("X-Request-ID", "Authorization", "Cookie"),
+		WithCapturedResponseHeaders("X-Result", "Set-Cookie"),
+		WithClientIP(true),
+	))
+	app.Get("/capabilities", func(c fiber.Ctx) error {
+		c.Set("X-Result", "ok")
+		c.Set("Set-Cookie", "SECRET")
+		return c.SendStatus(204)
+	})
+	req := httptest.NewRequest("GET", "http://localhost/capabilities", nil)
+	req.Header.Set("X-Request-ID", "request-1")
+	req.Header.Set("Authorization", "SECRET")
+	req.Header.Set("Cookie", "SECRET")
+	res, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.Header.Get("X-Trace-ID") == "" || res.Header.Get("Traceparent") == "" {
+		t.Fatal("trace response propagation options not preserved")
+	}
+	if publicCalls != 1 {
+		t.Fatalf("public endpoint callback calls=%d", publicCalls)
+	}
+	spans := recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("spans=%d", len(spans))
+	}
+	text := fmt.Sprint(spans[0].Attributes())
+	for _, want := range []string{"app.request", "app.response", "request-1", "x-result", "8443", "client.address"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %q in %s", want, text)
+		}
+	}
+	if strings.Contains(text, "SECRET") {
+		t.Fatalf("sensitive opt-in attribute leaked: %s", text)
+	}
+	metrics := fmt.Sprint(collect(t, reader))
+	if !strings.Contains(metrics, "mobile") || !strings.Contains(metrics, "apac") || strings.Contains(metrics, "SECRET") {
+		t.Fatalf("metric callback parity: %s", metrics)
 	}
 }
 func TestProviders(t *testing.T) {

@@ -1,4 +1,4 @@
-# httprouter
+# HTTPROUTER
 
 ```bash
 go get github.com/muhammadluth/goslogx/plugins/http/httprouter
@@ -15,6 +15,8 @@ router.GET("/orders/:id", goslogxrouter.Handle(logger, "/orders/:id",
 ```
 
 Wrap native handlers at registration with the **same static pattern** passed to the router. Parameters are forwarded unchanged through request context; no reflection or parameter-value telemetry is used. Wildcards such as `/files/*filepath` work as static templates. Each registered handler reuses `otelhttp` rather than adding a separate tracing stack.
+
+The server-side std capabilities are preserved: filters, propagator, signal controls, public endpoint functions, span start/name options, static and dynamic attributes, server name, and opt-in body-size message events. Client trace callbacks are not applicable to registered server handlers. Privacy and performance defaults match the std adapter.
 
 Unmatched routes and redirects remain native. For whole-router coverage, the generic standard HTTP wrapper is an alternative, but it cannot infer httprouter's template unless you provide it explicitly. Choose one layer.
 

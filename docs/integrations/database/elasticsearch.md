@@ -1,4 +1,4 @@
-# Elasticsearch
+# ELASTICSEARCH
 
 ```bash
 go get github.com/muhammadluth/goslogx/plugins/database/elasticsearch

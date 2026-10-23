@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 
 	"github.com/muhammadluth/goslogx"
 	"github.com/redis/go-redis/extra/redisotel/v9"
 	goredis "github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/trace"
@@ -20,8 +22,74 @@ const ScopeName = "github.com/muhammadluth/goslogx/plugins/cache/redis"
 type Option func(*config)
 
 type config struct {
-	closeChan chan struct{}
-	onError   func(error)
+	tracing                 bool
+	metrics                 bool
+	dbSystem                string
+	attributes              []attribute.KeyValue
+	poolName                string
+	dbStatement             bool
+	callerEnabled           bool
+	commandFilter           func(goredis.Cmder) bool
+	commandsFilter          func([]goredis.Cmder) bool
+	dialFilter              bool
+	closeChan               chan struct{}
+	semConvCompliantMetrics bool
+	onError                 func(error)
+}
+
+func defaultConfig() config {
+	return config{
+		tracing:                 true,
+		metrics:                 true,
+		dbSystem:                "redis",
+		poolName:                "redis",
+		semConvCompliantMetrics: true,
+	}
+}
+
+// WithTracing enables or disables Redis tracing. It is enabled by default.
+func WithTracing(enabled bool) Option { return func(c *config) { c.tracing = enabled } }
+
+// WithMetrics enables or disables Redis pool metrics. It is enabled by default.
+func WithMetrics(enabled bool) Option { return func(c *config) { c.metrics = enabled } }
+
+// WithDBSystem sets the bounded database system name on Redis telemetry.
+func WithDBSystem(system string) Option { return func(c *config) { c.dbSystem = system } }
+
+// WithAttributes adds validated static attributes to Redis spans and metrics.
+func WithAttributes(attrs ...attribute.KeyValue) Option {
+	return func(c *config) { c.attributes = append(c.attributes, attrs...) }
+}
+
+// WithPoolName sets the pool.name metric attribute. Keep it bounded.
+func WithPoolName(name string) Option { return func(c *config) { c.poolName = name } }
+
+// WithDBStatement enables raw Redis command capture. It can expose keys and
+// values and is disabled by default.
+func WithDBStatement(enabled bool) Option { return func(c *config) { c.dbStatement = enabled } }
+
+// WithCallerEnabled enables runtime caller discovery. It is disabled by
+// default because it adds runtime overhead and source location attributes.
+func WithCallerEnabled(enabled bool) Option { return func(c *config) { c.callerEnabled = enabled } }
+
+// WithCommandFilter skips tracing when filter returns true. When unset,
+// redisotel's default filter suppresses AUTH and HELLO AUTH commands.
+func WithCommandFilter(filter func(goredis.Cmder) bool) Option {
+	return func(c *config) { c.commandFilter = filter }
+}
+
+// WithCommandsFilter skips pipeline tracing when filter returns true. When
+// unset, redisotel suppresses a pipeline containing a sensitive auth command.
+func WithCommandsFilter(filter func([]goredis.Cmder) bool) Option {
+	return func(c *config) { c.commandsFilter = filter }
+}
+
+// WithDialFilter follows redisotel semantics: true filters dial spans.
+func WithDialFilter(filtered bool) Option { return func(c *config) { c.dialFilter = filtered } }
+
+// WithSemConvCompliantMetrics selects monotonic cumulative pool counters.
+func WithSemConvCompliantMetrics(enabled bool) Option {
+	return func(c *config) { c.semConvCompliantMetrics = enabled }
 }
 
 // WithErrorHandler receives asynchronous initialization errors for future Ring nodes.
@@ -51,28 +119,76 @@ func Instrument(client goredis.UniversalClient, provider goslogx.TelemetryProvid
 			mp = p
 		}
 	}
-	c := config{}
+	c := defaultConfig()
 	for _, opt := range opts {
 		if opt != nil {
 			opt(&c)
 		}
 	}
+	if strings.TrimSpace(c.dbSystem) == "" {
+		c.dbSystem = "redis"
+	}
+	if strings.TrimSpace(c.poolName) == "" {
+		c.poolName = "redis"
+	}
+	if !c.tracing && !c.metrics {
+		return nil
+	}
+	c.attributes = safeConfiguredAttributes(c.attributes)
+	common := []redisotel.Option{
+		redisotel.WithDBSystem(c.dbSystem),
+		redisotel.WithAttributes(c.attributes...),
+		redisotel.WithPoolName(c.poolName),
+	}
+	traceOptions := []redisotel.TracingOption{
+		redisotel.WithTracerProvider(privateTracerProvider{TracerProvider: tp, policy: privacyPolicy{
+			statement: c.dbStatement,
+			caller:    c.callerEnabled,
+			dbSystem:  c.dbSystem,
+			custom:    attributeKeys(c.attributes),
+		}}),
+		redisotel.WithDBStatement(c.dbStatement),
+		redisotel.WithCallerEnabled(c.callerEnabled),
+		redisotel.WithDialFilter(c.dialFilter),
+	}
+	for _, opt := range common {
+		traceOptions = append(traceOptions, opt)
+	}
+	if c.commandFilter != nil {
+		traceOptions = append(traceOptions, redisotel.WithCommandFilter(func(cmd goredis.Cmder) bool {
+			return redisotel.DefaultCommandFilter(cmd) || c.commandFilter(cmd)
+		}))
+	}
+	if c.commandsFilter != nil {
+		traceOptions = append(traceOptions, redisotel.WithCommandsFilter(func(cmds []goredis.Cmder) bool {
+			for _, cmd := range cmds {
+				if redisotel.DefaultCommandFilter(cmd) {
+					return true
+				}
+			}
+			return c.commandsFilter(cmds)
+		}))
+	}
 	instrument := func(node *goredis.Client) {
-		_ = redisotel.InstrumentTracing(node,
-			redisotel.WithTracerProvider(privateTracerProvider{tp}),
-			redisotel.WithDBStatement(false),
-			redisotel.WithCallerEnabled(false),
-		)
+		if c.tracing {
+			_ = redisotel.InstrumentTracing(node, traceOptions...)
+		}
 	}
 	metricOptions := []redisotel.MetricsOption{
-		redisotel.WithMeterProvider(scopedMeterProvider{MeterProvider: mp}), redisotel.WithPoolName("redis"),
-		redisotel.WithCloseChan(c.closeChan), redisotel.WithSemConvCompliantMetrics(true),
+		redisotel.WithMeterProvider(scopedMeterProvider{MeterProvider: mp}),
+		redisotel.WithCloseChan(c.closeChan),
+		redisotel.WithSemConvCompliantMetrics(c.semConvCompliantMetrics),
+	}
+	for _, opt := range common {
+		metricOptions = append(metricOptions, opt)
 	}
 	if ring, ok := client.(*goredis.Ring); ok {
 		// Ring constructs shards eagerly. Upstream OnNewNode sees only future nodes.
 		initialize := func(node *goredis.Client) error {
-			if err := redisotel.InstrumentMetrics(node, metricOptions...); err != nil {
-				return err
+			if c.metrics {
+				if err := redisotel.InstrumentMetrics(node, metricOptions...); err != nil {
+					return err
+				}
 			}
 			instrument(node)
 			return nil
@@ -87,8 +203,13 @@ func Instrument(client goredis.UniversalClient, provider goslogx.TelemetryProvid
 		})
 		return nil
 	}
-	if err := redisotel.InstrumentMetrics(client, metricOptions...); err != nil {
-		return err
+	if c.metrics {
+		if err := redisotel.InstrumentMetrics(client, metricOptions...); err != nil {
+			return err
+		}
+	}
+	if !c.tracing {
+		return nil
 	}
 	switch client := client.(type) {
 	case *goredis.Client:

@@ -1,4 +1,4 @@
-# Neo4j v6
+# NEO4J V6
 
 ```bash
 go get github.com/muhammadluth/goslogx/plugins/database/neo4j
@@ -23,3 +23,11 @@ Wrap each native session once. Run spans cover result consumption; exhaust, Coll
 Parameters and record values are never inspected. Cypher text requires explicit statement capture and a sanitizer. Session methods that are not overridden remain native; driver-wide connectivity checks and ExecuteQuery helpers are outside this session adapter.
 
 Read [privacy and signal options](../../architecture/integration-policy.md) before enabling statement capture or combining instrumentation layers. Providers belong to the application; plugins never shut them down.
+
+## IMPLEMENTATION
+
+This plugin uses a Neo4j session wrapper. The supplied goslogx provider owns provider selection; the native client keeps connection, retry, transaction, acknowledgement, and shutdown behavior.
+
+## AUTO-INSTRUMENTATION COEXISTENCE
+
+Use either this plugin or another instrumentation layer for the same client operation. Enabling both can produce duplicate spans, duplicate metrics, incorrect parentage, and extra overhead.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"reflect"
 
 	"github.com/muhammadluth/goslogx"
@@ -29,6 +30,7 @@ type config struct {
 	propagator                       propagation.TextMapPropagator
 	tracingDisabled, metricsDisabled bool
 	traceAttributes                  []attribute.KeyValue
+	messageEvents                    bool
 }
 
 // WithRoute records a static route template, such as /payments/{id}.
@@ -73,6 +75,55 @@ func WithMetricAttributes(attributes ...attribute.KeyValue) Option {
 			if (a.Key == "deployment.environment.name" || a.Key == "service.version" || a.Key == "app.channel" || a.Key == "app.region" || a.Key == "app.tier") && a.Value.Type() == attribute.STRING && len(a.Value.AsString()) <= 128 {
 				c.attributes = append(c.attributes, a)
 			}
+		}
+	}
+}
+
+// WithMetricAttributesFn adds bounded request-derived metric attributes.
+// The function runs once per request and must remain cheap.
+func WithMetricAttributesFn(fn func(*http.Request) []attribute.KeyValue) Option {
+	return func(c *config) {
+		if fn != nil {
+			c.options = append(c.options, otelhttp.WithMetricAttributesFn(func(r *http.Request) []attribute.KeyValue {
+				return encodeConfiguredMetricAttributes(fn(r))
+			}))
+		}
+	}
+}
+
+// MessageEvent selects bounded HTTP body-size events. Bodies are never captured.
+type MessageEvent int
+
+const (
+	ReadEvent MessageEvent = iota
+	WriteEvent
+)
+
+// WithMessageEvents enables per-read or per-write byte-count events.
+func WithMessageEvents(events ...MessageEvent) Option {
+	return func(c *config) {
+		upstream := make([]otelhttp.Event, 0, len(events))
+		for _, event := range events {
+			switch event {
+			case ReadEvent:
+				upstream = append(upstream, otelhttp.ReadEvents)
+			case WriteEvent:
+				upstream = append(upstream, otelhttp.WriteEvents)
+			}
+		}
+		if len(upstream) != 0 {
+			c.messageEvents = true
+			c.options = append(c.options, otelhttp.WithMessageEvents(upstream...))
+		}
+	}
+}
+
+// WithClientTrace installs standard-library HTTP client callbacks. It applies
+// to transports and has no effect on server handlers.
+func WithClientTrace(fn func(context.Context) *httptrace.ClientTrace) Option {
+	return func(c *config) {
+		if fn != nil {
+			c.options = append(c.options, otelhttp.WithClientTrace(fn))
 		}
 	}
 }
@@ -134,7 +185,7 @@ func options(provider goslogx.TelemetryProvider, opts []Option) []otelhttp.Optio
 		c.attributes = append(c.attributes, attribute.String("http.route", c.route))
 	}
 	return append(c.options,
-		otelhttp.WithTracerProvider(privateTracerProvider{TracerProvider: tp, route: c.route, attributes: c.traceAttributes}),
+		otelhttp.WithTracerProvider(privateTracerProvider{TracerProvider: tp, route: c.route, attributes: c.traceAttributes, messageEvents: c.messageEvents}),
 		otelhttp.WithMeterProvider(privateMeterProvider{MeterProvider: mp, attributes: c.attributes}),
 		otelhttp.WithPropagators(propagator),
 	)
@@ -223,6 +274,16 @@ func WithTraceAttributes(attrs ...attribute.KeyValue) Option {
 func WithPublicEndpoint() Option {
 	return func(c *config) {
 		c.options = append(c.options, otelhttp.WithPublicEndpointFn(func(*http.Request) bool { return true }))
+	}
+}
+
+// WithPublicEndpointFn conditionally links an extracted remote context instead
+// of making it the server span parent.
+func WithPublicEndpointFn(fn func(*http.Request) bool) Option {
+	return func(c *config) {
+		if fn != nil {
+			c.options = append(c.options, otelhttp.WithPublicEndpointFn(fn))
+		}
 	}
 }
 

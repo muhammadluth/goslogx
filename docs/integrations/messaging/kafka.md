@@ -1,4 +1,4 @@
-# Kafka
+# KAFKA
 
 Choose one optional Go 1.26 module for your native client:
 
@@ -31,3 +31,11 @@ Producer helpers inject headers into copies and finish spans at native completio
 kafka-go supports synchronous `Writer.WriteMessages`; native `Writer.Async` is rejected because its completion contract differs. Use FetchMessage followed by Process and your own CommitMessages; ReadMessage's automatic commits are not wrapped. IBM Sarama targets `github.com/IBM/sarama`, without obsolete Shopify dependencies. Its producer adapter supports SyncProducer, including per-message batch failures. `GroupHandler(setup, cleanup, handle)` delegates group lifecycle and passes the native session to your handler; call MarkMessage only according to your application's processing policy. AsyncProducer is outside this adapter.
 
 Metrics include successful sent/received counts and producer/receive/process timing with bounded error dimensions. Kafka native client stats/hooks remain the source for broker lag, retries, wire bytes and partition metrics; these helpers do not poll brokers or fabricate unavailable values. No offsets or partitions become metric dimensions. See [privacy and auto-instrumentation coexistence](../../architecture/integration-policy.md).
+
+## IMPLEMENTATION
+
+This plugin uses client-specific franz-go, kafka-go, and Sarama wrappers over native client APIs. The supplied goslogx provider owns provider selection; the native client keeps connection, retry, transaction, acknowledgement, and shutdown behavior.
+
+## AUTO-INSTRUMENTATION COEXISTENCE
+
+Use either this plugin or another instrumentation layer for the same client operation. Enabling both can produce duplicate spans, duplicate metrics, incorrect parentage, and extra overhead.

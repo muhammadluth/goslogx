@@ -1,4 +1,4 @@
-# Chi v5
+# CHI V5
 
 ```bash
 go get github.com/muhammadluth/goslogx/plugins/http/chi
@@ -16,6 +16,8 @@ router.Get("/orders/{id}", func(w http.ResponseWriter, r *http.Request) {
 ```
 
 Reuses the standard `otelhttp` layer. Chi resolves nested route patterns during dispatch; this adapter reads `RoutePattern()` after the handler and adds the template to the existing span and metric labeler. Concrete URL parameters are excluded. Install at the root router to observe all requests; subrouter paths combine into the registered template.
+
+The server-side std capabilities are preserved: filters, propagator, signal controls, public endpoint functions, span start/name options, static and dynamic attributes, server name, and opt-in body-size message events. Client trace callbacks are not applicable to router middleware. Privacy and performance defaults match the std adapter.
 
 Choose Chi middleware **or** a generic HTTP wrapper around the router. Nested goslogx standard wrappers recognize their own active instrumentation context and avoid an extra server span, but this does not detect external agents or unrelated middleware. Recovery should execute inside telemetry so the final status is available.
 

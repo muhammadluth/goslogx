@@ -25,7 +25,15 @@ var WithMetrics = httptelemetry.WithMetrics
 var WithSpanStartOptions = httptelemetry.WithSpanStartOptions
 
 var WithPublicEndpoint = httptelemetry.WithPublicEndpoint
+var WithPublicEndpointFn = httptelemetry.WithPublicEndpointFn
 var WithSpanNameFormatter = httptelemetry.WithSpanNameFormatter
+var WithMetricAttributesFn = httptelemetry.WithMetricAttributesFn
+var WithMessageEvents = httptelemetry.WithMessageEvents
+
+const (
+	ReadEvent  = httptelemetry.ReadEvent
+	WriteEvent = httptelemetry.WriteEvent
+)
 
 type paramsKey struct{}
 
@@ -45,6 +53,23 @@ func Handle(provider goslogx.TelemetryProvider, pattern string, next httprouter.
 	})}
 	if c.Public {
 		options = append(options, base.WithPublicEndpoint())
+	} else if c.PublicEndpointFn != nil {
+		options = append(options, base.WithPublicEndpointFn(c.PublicEndpointFn))
+	}
+	if c.MetricAttributesFn != nil {
+		options = append(options, base.WithMetricAttributesFn(c.MetricAttributesFn))
+	}
+	if len(c.MessageEvents) != 0 {
+		events := make([]base.MessageEvent, 0, len(c.MessageEvents))
+		for _, event := range c.MessageEvents {
+			switch event {
+			case httptelemetry.ReadEvent:
+				events = append(events, base.ReadEvent)
+			case httptelemetry.WriteEvent:
+				events = append(events, base.WriteEvent)
+			}
+		}
+		options = append(options, base.WithMessageEvents(events...))
 	}
 	h := base.NewHandler(p, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		params, _ := r.Context().Value(paramsKey{}).(httprouter.Params)

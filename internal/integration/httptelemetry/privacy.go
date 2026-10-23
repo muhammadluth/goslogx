@@ -2,12 +2,50 @@ package httptelemetry
 
 import (
 	"context"
+	"strings"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
+
+const configuredMetricPrefix = "goslogx.configured."
+
+func safeConfiguredMetricAttributes(input []attribute.KeyValue) []attribute.KeyValue {
+	result := make([]attribute.KeyValue, 0, len(input))
+	for _, a := range input {
+		switch a.Key {
+		case "app.channel", "app.region", "app.tier", "service.version", "deployment.environment.name":
+			if a.Value.Type() == attribute.STRING && len(a.Value.AsString()) <= 128 {
+				result = append(result, a)
+			}
+		}
+	}
+	return result
+}
+
+// EncodeMetricAttributes marks validated callback attributes so the private
+// meter can distinguish them from request-controlled upstream attributes.
+func EncodeMetricAttributes(input []attribute.KeyValue) []attribute.KeyValue {
+	safe := safeConfiguredMetricAttributes(input)
+	result := make([]attribute.KeyValue, 0, len(safe))
+	for _, a := range safe {
+		result = append(result, attribute.KeyValue{Key: attribute.Key(configuredMetricPrefix + string(a.Key)), Value: a.Value})
+	}
+	return result
+}
+
+func decodeMetricAttributes(input []attribute.KeyValue) []attribute.KeyValue {
+	result := make([]attribute.KeyValue, 0, len(input))
+	for _, a := range input {
+		key := string(a.Key)
+		if strings.HasPrefix(key, configuredMetricPrefix) {
+			result = append(result, attribute.KeyValue{Key: attribute.Key(strings.TrimPrefix(key, configuredMetricPrefix)), Value: a.Value})
+		}
+	}
+	return safeConfiguredMetricAttributes(result)
+}
 
 func safeAttributes(input []attribute.KeyValue) []attribute.KeyValue {
 	output := make([]attribute.KeyValue, 0, len(input))
@@ -161,7 +199,8 @@ func (m privateMeter) Float64Histogram(name string, opts ...metric.Float64Histog
 func recordOptions(opts []metric.RecordOption, attributes []attribute.KeyValue) []metric.RecordOption {
 	c := metric.NewRecordConfig(opts)
 	set := c.Attributes()
-	clean := append(safeMetricAttributes(set.ToSlice()), attributes...)
+	clean := append(safeMetricAttributes(set.ToSlice()), decodeMetricAttributes(set.ToSlice())...)
+	clean = append(clean, attributes...)
 	return []metric.RecordOption{metric.WithAttributes(clean...)}
 }
 
@@ -200,7 +239,8 @@ func (m privateMeter) Int64UpDownCounter(name string, opts ...metric.Int64UpDown
 func addOptions(opts []metric.AddOption, attrs []attribute.KeyValue) []metric.AddOption {
 	c := metric.NewAddConfig(opts)
 	set := c.Attributes()
-	clean := append(safeMetricAttributes(set.ToSlice()), attrs...)
+	clean := append(safeMetricAttributes(set.ToSlice()), decodeMetricAttributes(set.ToSlice())...)
+	clean = append(clean, attrs...)
 	return []metric.AddOption{metric.WithAttributes(clean...)}
 }
 

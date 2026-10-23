@@ -1,4 +1,4 @@
-# database/sql
+# DATABASE/SQL
 
 ```bash
 go get github.com/muhammadluth/goslogx/plugins/database/sql
@@ -21,3 +21,11 @@ The adapter uses [XSAM/otelsql](https://github.com/XSAM/otelsql) for query, exec
 MySQL (`go-sql-driver/mysql`), PostgreSQL (`lib/pq`), SQLite (`modernc.org/sqlite` or `mattn/go-sqlite3`), SQL Server and other compatible drivers use this same module. Choose one driver in your application; this module adds no database driver or CGO requirement. Driver protocol compatibility still depends on that driver's configuration and server version. Plugin tests exercise standard driver interfaces with an in-memory fake. The [SQL compatibility module](../../../examples/database/sql/compatibility/README.md) executes pure-Go SQLite queries and transactions and checks real MySQL, lib/pq and SQL Server driver construction. These tests do not certify live-server compatibility.
 
 Read [privacy and signal options](../../architecture/integration-policy.md) before enabling statement capture or combining instrumentation layers. Providers belong to the application; plugins never shut them down.
+
+## IMPLEMENTATION
+
+This plugin uses the maintained XSAM/otelsql instrumentation. The supplied goslogx provider owns provider selection; the native client keeps connection, retry, transaction, acknowledgement, and shutdown behavior.
+
+## AUTO-INSTRUMENTATION COEXISTENCE
+
+Use either this plugin or another instrumentation layer for the same client operation. Enabling both can produce duplicate spans, duplicate metrics, incorrect parentage, and extra overhead.

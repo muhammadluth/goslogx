@@ -2,6 +2,7 @@
 package grpc
 
 import (
+	"context"
 	"strings"
 
 	"github.com/muhammadluth/goslogx"
@@ -9,6 +10,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/stats"
 )
 
@@ -20,6 +22,11 @@ type config struct {
 	prop                    propagation.TextMapPropagator
 	filter                  func(*stats.RPCTagInfo) bool
 	public                  bool
+	publicFn                func(context.Context, *stats.RPCTagInfo) bool
+	messageEvents           []otelgrpc.Event
+	spanKind                trace.SpanKind
+	spanKindSet             bool
+	metricAttributesFn      func(context.Context) []attribute.KeyValue
 	traceAttrs, metricAttrs []attribute.KeyValue
 }
 type Option func(*config)
@@ -39,6 +46,37 @@ func WithPropagator(p propagation.TextMapPropagator) Option {
 }
 func WithFilter(f func(*stats.RPCTagInfo) bool) Option { return func(c *config) { c.filter = f } }
 func WithPublicEndpoint() Option                       { return func(c *config) { c.public = true } }
+func WithPublicEndpointFn(fn func(context.Context, *stats.RPCTagInfo) bool) Option {
+	return func(c *config) { c.publicFn = fn }
+}
+
+// MessageEvent identifies a bounded gRPC message-size event. Payloads are never captured.
+type MessageEvent int
+
+const (
+	ReceivedEvent MessageEvent = iota
+	SentEvent
+)
+
+// WithMessageEvents enables per-message size events. It is disabled by default
+// because streaming RPCs can produce many events.
+func WithMessageEvents(events ...MessageEvent) Option {
+	return func(c *config) {
+		for _, event := range events {
+			switch event {
+			case ReceivedEvent:
+				c.messageEvents = append(c.messageEvents, otelgrpc.ReceivedEvents)
+			case SentEvent:
+				c.messageEvents = append(c.messageEvents, otelgrpc.SentEvents)
+			}
+		}
+	}
+}
+
+// WithSpanKind overrides the upstream client/server span kind explicitly.
+func WithSpanKind(kind trace.SpanKind) Option {
+	return func(c *config) { c.spanKind, c.spanKindSet = kind, true }
+}
 
 // WithMethodNames opts known, registered full methods into spans and dimensions.
 // Without this option names are gRPC and raw service/method metadata is omitted.
@@ -61,6 +99,9 @@ func WithTraceAttributes(attrs ...attribute.KeyValue) Option {
 	copy := append([]attribute.KeyValue(nil), attrs...)
 	return func(c *config) { c.traceAttrs = append(c.traceAttrs, copy...) }
 }
+
+// WithSpanAttributes is the upstream-oriented alias of WithTraceAttributes.
+func WithSpanAttributes(attrs ...attribute.KeyValue) Option { return WithTraceAttributes(attrs...) }
 func WithMetricAttributes(attrs ...attribute.KeyValue) Option {
 	copy := append([]attribute.KeyValue(nil), attrs...)
 	return func(c *config) {
@@ -73,6 +114,11 @@ func WithMetricAttributes(attrs ...attribute.KeyValue) Option {
 			}
 		}
 	}
+}
+
+// WithMetricAttributesFn adds validated bounded attributes computed once per RPC.
+func WithMetricAttributesFn(fn func(context.Context) []attribute.KeyValue) Option {
+	return func(c *config) { c.metricAttributesFn = fn }
 }
 func options(p goslogx.TelemetryProvider, opts []Option) []otelgrpc.Option {
 	c := config{}
@@ -91,6 +137,19 @@ func options(p goslogx.TelemetryProvider, opts []Option) []otelgrpc.Option {
 	}
 	if c.public {
 		out = append(out, otelgrpc.WithPublicEndpoint())
+	} else if c.publicFn != nil {
+		out = append(out, otelgrpc.WithPublicEndpointFn(c.publicFn))
+	}
+	if len(c.messageEvents) != 0 {
+		out = append(out, otelgrpc.WithMessageEvents(c.messageEvents...))
+	}
+	if c.spanKindSet {
+		out = append(out, otelgrpc.WithSpanKind(c.spanKind))
+	}
+	if c.metricAttributesFn != nil {
+		out = append(out, otelgrpc.WithMetricAttributesFn(func(ctx context.Context) []attribute.KeyValue {
+			return safeMetricAttributes(c.metricAttributesFn(ctx))
+		}))
 	}
 	return out
 }

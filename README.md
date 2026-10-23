@@ -290,14 +290,16 @@ Start with the [DOCUMENTATION INDEX](docs/README.md).
 
 | Area | Guide |
 | --- | --- |
-| Observability setup | [OBSERVABILITY](docs/guides/observability.md) |
+| Installation and setup | [GETTING STARTED](docs/getting-started/installation.md) |
+| Logging and masking | [LOGGING](docs/guides/logging.md) and [MASKING](docs/guides/masking.md) |
 | Distributed tracing | [TRACING](docs/guides/tracing.md) |
 | Metrics | [METRICS](docs/guides/metrics.md) |
 | Cardinality and privacy | [CARDINALITY AND PRIVACY](docs/guides/cardinality.md) |
 | Production lifecycle | [PRODUCTION](docs/guides/production.md) |
 | Architecture | [ARCHITECTURE](docs/architecture/README.md) |
 | Plugin ecosystem | [INTEGRATIONS](docs/integrations/README.md) |
-| Collector deployment | [OBSERVABILITY PRODUCTION](docs/guides/observability-production.md) |
+| Collector deployment | [COLLECTOR OPERATIONS](docs/operations/collector.md) |
+| Troubleshooting | [TROUBLESHOOTING](docs/operations/troubleshooting.md) |
 
 The public API reference is available on [pkg.go.dev](https://pkg.go.dev/github.com/muhammadluth/goslogx).
 
@@ -314,22 +316,6 @@ examples/
 ```
 
 The full-observability example demonstrates an end-to-end trace across HTTP, database, Redis, messaging, workers, and outbound HTTP.
-
-## DEVELOPMENT
-
-```bash
-make test-all
-make check-core
-```
-
-Or:
-
-```bash
-bash scripts/test-modules.sh
-BENCHMARKS=1 bash scripts/test-modules.sh
-```
-
-Root `go test ./...` covers the core module only; nested plugins are separate Go modules and must be validated independently.
 
 ## LICENSE
 

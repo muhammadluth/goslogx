@@ -1,4 +1,4 @@
-# Production Collector reference
+# PRODUCTION COLLECTOR REFERENCE
 
 This directory contains an adaptable trace pipeline for `goslogx`:
 
@@ -13,7 +13,21 @@ Prometheus internal metrics, retry, and a disk-backed exporter queue. Tail
 sampling policies are included but intentionally omitted from the active
 pipeline.
 
-## Runtime and infrastructure metrics
+## PORTS AND SIGNAL ROUTES
+
+| Port | Purpose |
+| --- | --- |
+| `4317` | OTLP/gRPC receiver used by goslogx managed traces and metrics |
+| `4318` | OTLP/HTTP receiver for compatible senders |
+| `13133` | Collector health endpoint |
+| `8888` | Collector internal Prometheus metrics |
+| `3200` | Tempo query API in the local Compose stack |
+
+`collector.yaml` routes traces to the configured OTLP/Tempo backend. `collector-hostmetrics.yaml` adds an application and host metrics pipeline with a separate metrics backend. These files do not configure an OTLP logs pipeline: goslogx writes JSON logs to its configured writer, and a log agent such as Alloy must collect stdout or files and send them to Loki or another log backend.
+
+The Docker Compose file mounts the Collector and Tempo configuration from this directory and stores Tempo development data locally. The Kubernetes manifest mounts Collector configuration through a ConfigMap and uses a persistent volume for the exporter queue.
+
+## RUNTIME AND INFRASTRUCTURE METRICS
 
 `goslogx` does not collect CPU, memory, or network metrics. Those signals need
 to come from the layer that owns the resource:
@@ -45,7 +59,7 @@ the trace backend, so it must not be used as the metrics exporter target.
 Collector-internal metrics are exposed separately on port `8888`; scrape them
 to alert on CPU, memory, exporter failures, and queue growth.
 
-## Local Docker Compose
+## LOCAL DOCKER COMPOSE
 
 Run the Collector and a development Tempo backend:
 
@@ -59,7 +73,7 @@ Configure the application with endpoint `127.0.0.1:4317` and `Insecure: true`.
 Tempo's query API is available at `http://127.0.0.1:3200`. The bundled Tempo
 uses local storage and is intended for development, not production HA.
 
-## Persistent queue and retry
+## PERSISTENT QUEUE AND RETRY
 
 `file_storage` turns the exporter's sending queue into a persistent queue. It
 can survive process restarts, but it is not an unlimited archive: size the
@@ -70,7 +84,7 @@ Removing the extension also requires removing it from `service.extensions`.
 Important internal metrics include exporter send failures, queue capacity and
 queue size. Scrape port `8888` and alert before the queue or disk fills.
 
-## Tail sampling
+## TAIL SAMPLING
 
 To enable the supplied policies, add `tail_sampling` between
 `resource/deployment` and `batch`. Tail sampling requires all spans for a trace
@@ -85,7 +99,7 @@ window expires. Before enabling it:
 Head sampling in `goslogx` happens before tail sampling. A trace discarded by
 head sampling can never be recovered by the Collector.
 
-## TLS and authentication
+## TLS AND AUTHENTICATION
 
 [`tls-auth-example.yaml`](tls-auth-example.yaml) demonstrates receiver mTLS,
 Basic authentication, backend TLS/mTLS, and an authorization header. Mount
@@ -96,7 +110,7 @@ For `goslogx`, use the Collector CA in `TracingConfig.TLSConfig` and set the
 matching `authorization` header. Do not use `Insecure` outside a trusted local
 network.
 
-## Kubernetes
+## KUBERNETES
 
 [`kubernetes.yaml`](kubernetes.yaml) provides a ConfigMap, Service, hardened
 StatefulSet, health probes, resource limits, and a persistent volume claim for

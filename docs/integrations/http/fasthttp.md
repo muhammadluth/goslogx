@@ -1,4 +1,4 @@
-# fasthttp
+# FASTHTTP
 
 ```bash
 go get github.com/muhammadluth/goslogx/plugins/http/fasthttp
@@ -27,3 +27,11 @@ fasthttp itself has no router template API. Wrap a handler at registration and s
 5xx responses and panics mark failure. Panics are rethrown after telemetry cleanup; your recovery/server policy stays in control. Duration and active-request metrics come from the same shared HTTP policy used for go-restful's missing metrics.
 
 See [HTTP integration options](README.md) for privacy, provider ownership, filtering, signal controls and automatic-instrumentation coexistence. The [HTTP examples](../../../examples/http/README.md) demonstrates downstream correlation.
+
+## IMPLEMENTATION
+
+This plugin uses a native fasthttp handler adapter using stable handler hooks. The supplied goslogx provider owns provider selection; the native client keeps connection, retry, transaction, acknowledgement, and shutdown behavior.
+
+## AUTO-INSTRUMENTATION COEXISTENCE
+
+Use either this plugin or another instrumentation layer for the same client operation. Enabling both can produce duplicate spans, duplicate metrics, incorrect parentage, and extra overhead.

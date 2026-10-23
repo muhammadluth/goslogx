@@ -10,6 +10,72 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+const (
+	traceAttributePrefix  = "goslogx.trace."
+	metricAttributePrefix = "goslogx.metric."
+)
+
+type privacyPolicy struct {
+	headers  map[attribute.Key]struct{}
+	clientIP bool
+	port     bool
+}
+
+func safeConfiguredAttributes(input []attribute.KeyValue) []attribute.KeyValue {
+	result := make([]attribute.KeyValue, 0, len(input))
+	for _, a := range input {
+		key := strings.ToLower(string(a.Key))
+		if key == "" || strings.Contains(key, "password") || strings.Contains(key, "credential") ||
+			strings.Contains(key, "authorization") || strings.Contains(key, "token") ||
+			strings.Contains(key, "secret") || strings.Contains(key, "cookie") ||
+			strings.HasPrefix(key, "http.") || strings.HasPrefix(key, "url.") ||
+			strings.HasPrefix(key, "server.") || strings.HasPrefix(key, "client.") || strings.HasPrefix(key, "network.") {
+			continue
+		}
+		if a.Value.Type() == attribute.STRING && len(a.Value.AsString()) > 256 {
+			continue
+		}
+		result = append(result, a)
+	}
+	return result
+}
+
+func encodeTraceAttributes(input []attribute.KeyValue) []attribute.KeyValue {
+	return encodeAttributes(traceAttributePrefix, safeConfiguredAttributes(input))
+}
+
+func encodeMetricAttributes(input []attribute.KeyValue) []attribute.KeyValue {
+	approved := make([]attribute.KeyValue, 0, len(input))
+	for _, a := range input {
+		switch a.Key {
+		case "app.channel", "app.region", "app.tier", "service.version", "deployment.environment.name":
+			if a.Value.Type() == attribute.STRING && len(a.Value.AsString()) <= 128 {
+				approved = append(approved, a)
+			}
+		}
+	}
+	return encodeAttributes(metricAttributePrefix, approved)
+}
+
+func encodeAttributes(prefix string, input []attribute.KeyValue) []attribute.KeyValue {
+	result := make([]attribute.KeyValue, 0, len(input))
+	for _, a := range input {
+		result = append(result, attribute.KeyValue{Key: attribute.Key(prefix + string(a.Key)), Value: a.Value})
+	}
+	return result
+}
+
+func decodeAttributes(prefix string, input []attribute.KeyValue) []attribute.KeyValue {
+	result := make([]attribute.KeyValue, 0, len(input))
+	for _, a := range input {
+		key := string(a.Key)
+		if strings.HasPrefix(key, prefix) {
+			result = append(result, attribute.KeyValue{Key: attribute.Key(strings.TrimPrefix(key, prefix)), Value: a.Value})
+		}
+	}
+	return result
+}
+
 func method(s string) string {
 	switch s {
 	case "GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH":
@@ -18,8 +84,9 @@ func method(s string) string {
 	return "_OTHER"
 }
 
-func safeAttributes(input []attribute.KeyValue) []attribute.KeyValue {
+func safeAttributes(input []attribute.KeyValue, policy privacyPolicy) []attribute.KeyValue {
 	output := make([]attribute.KeyValue, 0, len(input))
+	output = append(output, safeConfiguredAttributes(decodeAttributes(traceAttributePrefix, input))...)
 	for _, a := range input {
 		switch a.Key {
 		case "error.type":
@@ -56,8 +123,22 @@ func safeAttributes(input []attribute.KeyValue) []attribute.KeyValue {
 			if a.Value.AsString() != "1.0" && a.Value.AsString() != "1.1" {
 				continue
 			}
+		case "server.port":
+			if !policy.port || a.Value.Type() != attribute.INT64 || a.Value.AsInt64() <= 0 || a.Value.AsInt64() > 65535 {
+				continue
+			}
+		case "client.address", "network.peer.address":
+			if !policy.clientIP || a.Value.Type() != attribute.STRING || a.Value.AsString() == "" {
+				continue
+			}
+		case "network.peer.port":
+			if !policy.clientIP || a.Value.Type() != attribute.INT64 || a.Value.AsInt64() <= 0 || a.Value.AsInt64() > 65535 {
+				continue
+			}
 		default:
-			continue
+			if _, ok := policy.headers[a.Key]; !ok || a.Value.Type() != attribute.STRINGSLICE {
+				continue
+			}
 		}
 		output = append(output, a)
 	}
@@ -66,7 +147,8 @@ func safeAttributes(input []attribute.KeyValue) []attribute.KeyValue {
 
 // Body-size measurements belong in histograms, not metric dimensions.
 func safeMetricAttributes(input []attribute.KeyValue) []attribute.KeyValue {
-	attributes := safeAttributes(input)
+	attributes := safeAttributes(input, privacyPolicy{})
+	attributes = append(attributes, decodeAttributes(metricAttributePrefix, input)...)
 	result := attributes[:0]
 	for _, a := range attributes {
 		if a.Key != "http.request.body.size" && a.Key != "http.response.body.size" {
@@ -81,6 +163,7 @@ type privateTracerProvider struct {
 	serverName string
 	attributes []attribute.KeyValue
 	start      []trace.SpanStartOption
+	policy     privacyPolicy
 }
 
 func (p privateTracerProvider) Tracer(name string, opts ...trace.TracerOption) trace.Tracer {
@@ -94,7 +177,7 @@ type privateTracer struct {
 
 func (t privateTracer) Start(ctx context.Context, name string, opts ...trace.SpanStartOption) (context.Context, trace.Span) {
 	c := trace.NewSpanStartConfig(opts...)
-	attrs := safeAttributes(c.Attributes())
+	attrs := safeAttributes(c.Attributes(), t.provider.policy)
 	if t.provider.serverName != "" {
 		attrs = append(attrs, attribute.String("server.address", t.provider.serverName))
 	}
@@ -114,12 +197,12 @@ func (t privateTracer) Start(ctx context.Context, name string, opts ...trace.Spa
 
 type privateSpan struct {
 	trace.Span
-	provider trace.TracerProvider
+	provider privateTracerProvider
 }
 
 func (s privateSpan) TracerProvider() trace.TracerProvider { return s.provider }
 func (s privateSpan) SetAttributes(attrs ...attribute.KeyValue) {
-	s.Span.SetAttributes(safeAttributes(attrs)...)
+	s.Span.SetAttributes(safeAttributes(attrs, s.provider.policy)...)
 }
 func (s privateSpan) SetStatus(code codes.Code, _ string)     { s.Span.SetStatus(code, "") }
 func (s privateSpan) RecordError(error, ...trace.EventOption) {}

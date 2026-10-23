@@ -1,4 +1,4 @@
-# ClickHouse native v2
+# CLICKHOUSE NATIVE V2
 
 ```bash
 go get github.com/muhammadluth/goslogx/plugins/database/clickhouse
@@ -20,3 +20,11 @@ The wrapper preserves the native connection interface and uses `clickhouse.Conte
 Query spans remain open until rows are exhausted or closed. Scan a QueryRow, close query/format streams and finalize or close every batch. These native resource lifecycles also end telemetry. Batch append/flush errors are recorded without reading appended values. Query/format payloads and arguments are never captured. For ClickHouse through `database/sql`, use the SQL plugin instead.
 
 Read [privacy and signal options](../../architecture/integration-policy.md) before enabling statement capture or combining instrumentation layers. Providers belong to the application; plugins never shut them down.
+
+## IMPLEMENTATION
+
+This plugin uses a clickhouse-go connection wrapper with the OpenTelemetry API. The supplied goslogx provider owns provider selection; the native client keeps connection, retry, transaction, acknowledgement, and shutdown behavior.
+
+## AUTO-INSTRUMENTATION COEXISTENCE
+
+Use either this plugin or another instrumentation layer for the same client operation. Enabling both can produce duplicate spans, duplicate metrics, incorrect parentage, and extra overhead.
