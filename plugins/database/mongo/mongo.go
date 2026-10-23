@@ -90,16 +90,12 @@ func NewMonitors(p goslogx.TelemetryProvider, opts ...Option) (*Monitors, error)
 	if cfg.Namespace != "" {
 		attrs = append(attrs, attribute.String("db.namespace", cfg.Namespace))
 	}
-	type key struct {
-		address string
-		id      int64
-	}
-	states := make(map[key]string)
+	states := make(map[ConnectionKey]string)
 	var mu sync.Mutex
 	pool := &event.PoolMonitor{Event: func(e *event.PoolEvent) {
 		mu.Lock()
 		defer mu.Unlock()
-		k := key{e.Address, e.ConnectionID}
+		k := ConnectionKey{Address: e.Address, ID: e.ConnectionID}
 		change := func(state string, delta int64) {
 			a := append(append([]attribute.KeyValue(nil), attrs...), attribute.String("db.client.connection.state", state))
 			connections.Add(context.Background(), delta, metric.WithAttributes(a...))
@@ -116,7 +112,7 @@ func NewMonitors(p goslogx.TelemetryProvider, opts ...Option) (*Monitors, error)
 		case event.ConnectionClosed:
 		case event.ConnectionPoolClosed:
 			for k, state := range states {
-				if k.address == e.Address {
+				if k.Address == e.Address {
 					change(state, -1)
 					delete(states, k)
 				}
