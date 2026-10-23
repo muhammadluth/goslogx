@@ -44,3 +44,23 @@ func TestPublicEndpointFnParity(t *testing.T) {
 		t.Fatalf("public endpoint callback parity: calls=%d spans=%d", calls, len(p.Recorder.Ended()))
 	}
 }
+
+func TestPublicEndpointDoesNotUseRemoteParent(t *testing.T) {
+	p := fixture.New(t)
+	filter, err := NewFilter(p, WithPublicEndpoint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	container := restful.NewContainer()
+	container.Filter(filter)
+	service := new(restful.WebService)
+	service.Route(service.GET("/public").To(func(_ *restful.Request, response *restful.Response) { response.WriteHeader(204) }))
+	container.Add(service)
+	req := httptest.NewRequest(http.MethodGet, "/public", nil)
+	req.Header.Set("traceparent", "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01")
+	container.ServeHTTP(httptest.NewRecorder(), req)
+	spans := p.Recorder.Ended()
+	if len(spans) != 1 || spans[0].Parent().IsValid() {
+		t.Fatalf("public endpoint used request parent: %#v", spans)
+	}
+}
