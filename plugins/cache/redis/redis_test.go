@@ -159,11 +159,13 @@ func TestClients(t *testing.T) {
 					t.Fatalf("metrics leaked: %s", raw)
 				}
 				duration, failures, pool := false, false, false
+				metricNames := make(map[string]bool)
 				for _, scope := range data.ScopeMetrics {
 					if scope.Scope.Name != ScopeName {
 						t.Fatal("wrong metric scope")
 					}
 					for _, m := range scope.Metrics {
+						metricNames[m.Name] = true
 						if m.Name == "db.client.connections.usage" {
 							pool = true
 						}
@@ -186,6 +188,23 @@ func TestClients(t *testing.T) {
 				}
 				if !duration || !failures || !pool {
 					t.Fatalf("metrics: duration=%v failures=%v pool=%v", duration, failures, pool)
+				}
+				for _, name := range []string{
+					"db.client.connections.idle.max",
+					"db.client.connections.idle.min",
+					"db.client.connections.max",
+					"db.client.connections.usage",
+					"db.client.connections.waits",
+					"db.client.connections.waits_duration",
+					"db.client.connections.timeouts",
+					"db.client.connections.hits",
+					"db.client.connections.misses",
+					"db.client.connections.create_time",
+					"db.client.connections.use_time",
+				} {
+					if !metricNames[name] {
+						t.Errorf("missing upstream Redis metric %q; got %v", name, metricNames)
+					}
 				}
 			}
 		})
@@ -259,7 +278,7 @@ func TestCapabilityParityOptions(t *testing.T) {
 		}
 		var command sdktrace.ReadOnlySpan
 		for _, span := range recorder.Ended() {
-			if span.Name() == "redis.command" {
+			if span.Name() == "redis.set" {
 				command = span
 			}
 		}
@@ -369,6 +388,57 @@ func TestAttributePrivacyValidation(t *testing.T) {
 	})
 	if len(attrs) != 1 || attrs[0].Key != "service.namespace" {
 		t.Fatalf("unexpected safe attributes: %v", attrs)
+	}
+}
+
+func TestCommandSpanNamesExposeOperationWithoutArguments(t *testing.T) {
+	server := miniredis.RunT(t)
+	client := goredis.NewClient(&goredis.Options{Addr: server.Addr()})
+	defer client.Close()
+	p, recorder, _ := telemetry(t)
+	if err := Instrument(client, p, WithMetrics(false), WithCommandSpanNames(true), WithDialFilter(true)); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Set(context.Background(), "customer:SECRET", "value:SECRET", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	spans := recorder.Ended()
+	var span sdktrace.ReadOnlySpan
+	for _, candidate := range spans {
+		if candidate.Name() == "redis.set" {
+			span = candidate
+			break
+		}
+	}
+	if span == nil {
+		t.Fatalf("redis.set span missing from %v", spans)
+	}
+	attrs := attribute.NewSet(span.Attributes()...)
+	operation, ok := attrs.Value("db.operation.name")
+	if !ok || operation.AsString() != "SET" {
+		t.Fatalf("operation attribute=%q, present=%v", operation.AsString(), ok)
+	}
+	if text := fmt.Sprint(span.Name(), span.Attributes(), span.Events(), span.Status()); strings.Contains(text, "SECRET") {
+		t.Fatalf("command span leaked arguments: %s", text)
+	}
+}
+
+func TestSafeOperationRejectsUnboundedOrInvalidNames(t *testing.T) {
+	tests := []struct {
+		name, input, want string
+	}{
+		{name: "command", input: "client info", want: "CLIENT INFO"},
+		{name: "pipeline", input: "redis.pipeline get set", want: "PIPELINE"},
+		{name: "invalid", input: "get customer:secret", want: ""},
+		{name: "unknown command", input: "command-secret", want: ""},
+		{name: "oversized", input: strings.Repeat("x", 65), want: ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := safeOperation(test.input); got != test.want {
+				t.Fatalf("safeOperation(%q)=%q want %q", test.input, got, test.want)
+			}
+		})
 	}
 }
 

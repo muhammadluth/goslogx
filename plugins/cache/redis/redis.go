@@ -28,6 +28,7 @@ type config struct {
 	attributes              []attribute.KeyValue
 	poolName                string
 	dbStatement             bool
+	commandSpanNames        bool
 	callerEnabled           bool
 	commandFilter           func(goredis.Cmder) bool
 	commandsFilter          func([]goredis.Cmder) bool
@@ -43,6 +44,7 @@ func defaultConfig() config {
 		metrics:                 true,
 		dbSystem:                "redis",
 		poolName:                "redis",
+		commandSpanNames:        true,
 		semConvCompliantMetrics: true,
 	}
 }
@@ -67,6 +69,14 @@ func WithPoolName(name string) Option { return func(c *config) { c.poolName = na
 // WithDBStatement enables raw Redis command capture. It can expose keys and
 // values and is disabled by default.
 func WithDBStatement(enabled bool) Option { return func(c *config) { c.dbStatement = enabled } }
+
+// WithCommandSpanNames exposes only the bounded Redis operation name in the
+// span name and db.operation.name attribute. Command arguments, keys, and
+// values remain excluded. It is enabled by default; disable it to retain the
+// legacy fixed redis.command name.
+func WithCommandSpanNames(enabled bool) Option {
+	return func(c *config) { c.commandSpanNames = enabled }
+}
 
 // WithCallerEnabled enables runtime caller discovery. It is disabled by
 // default because it adds runtime overhead and source location attributes.
@@ -142,10 +152,11 @@ func Instrument(client goredis.UniversalClient, provider goslogx.TelemetryProvid
 	}
 	traceOptions := []redisotel.TracingOption{
 		redisotel.WithTracerProvider(privateTracerProvider{TracerProvider: tp, policy: privacyPolicy{
-			statement: c.dbStatement,
-			caller:    c.callerEnabled,
-			dbSystem:  c.dbSystem,
-			custom:    attributeKeys(c.attributes),
+			statement:        c.dbStatement,
+			commandSpanNames: c.commandSpanNames,
+			caller:           c.callerEnabled,
+			dbSystem:         c.dbSystem,
+			custom:           attributeKeys(c.attributes),
 		}}),
 		redisotel.WithDBStatement(c.dbStatement),
 		redisotel.WithCallerEnabled(c.callerEnabled),
