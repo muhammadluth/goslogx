@@ -9,11 +9,40 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+var safeRedisOperations = map[string]struct{}{
+	"APPEND": {}, "BITCOUNT": {}, "BITOP": {}, "BLMOVE": {}, "BLPOP": {}, "BRPOP": {},
+	"BZPOPMAX": {}, "BZPOPMIN": {}, "CLIENT INFO": {}, "CLIENT SETINFO": {}, "DECR": {},
+	"DECRBY": {}, "DEL": {}, "EXISTS": {}, "EXPIRE": {}, "EXPIREAT": {}, "GET": {},
+	"GETDEL": {}, "GETEX": {}, "GETRANGE": {}, "GETSET": {}, "HDEL": {}, "HEXISTS": {},
+	"HGET": {}, "HGETALL": {}, "HINCRBY": {}, "HINCRBYFLOAT": {}, "HKEYS": {}, "HLEN": {},
+	"HMGET": {}, "HMSET": {}, "HSCAN": {}, "HSET": {}, "HSETNX": {}, "HVALS": {},
+	"INCR": {}, "INCRBY": {}, "INCRBYFLOAT": {}, "LINSERT": {}, "LLEN": {}, "LMOVE": {},
+	"LPOP": {}, "LPOS": {}, "LPUSH": {}, "LPUSHX": {}, "LRANGE": {}, "LREM": {},
+	"LSET": {}, "LTRIM": {}, "MGET": {}, "MSET": {}, "MSETNX": {}, "PERSIST": {},
+	"PEXPIRE": {}, "PEXPIREAT": {}, "PFADD": {}, "PFCOUNT": {}, "PFMERGE": {}, "PING": {},
+	"PUBLISH": {}, "RANDOMKEY": {}, "RENAME": {}, "RENAMENX": {}, "RPOP": {}, "RPOPLPUSH": {},
+	"RPUSH": {}, "RPUSHX": {}, "SADD": {}, "SCAN": {}, "SCARD": {}, "SDIFF": {},
+	"SDIFFSTORE": {}, "SET": {}, "SETEX": {}, "SETNX": {}, "SINTER": {}, "SINTERSTORE": {},
+	"SISMEMBER": {}, "SMEMBERS": {}, "SMISMEMBER": {}, "SMOVE": {}, "SPOP": {}, "SRANDMEMBER": {},
+	"SREM": {}, "SSCAN": {}, "STRLEN": {}, "SUNION": {}, "SUNIONSTORE": {}, "TTL": {},
+	"TYPE": {}, "UNLINK": {}, "XACK": {}, "XADD": {}, "XAUTOCLAIM": {}, "XCLAIM": {},
+	"XDEL": {}, "XGROUP CREATE": {}, "XGROUP CREATECONSUMER": {}, "XGROUP DELCONSUMER": {},
+	"XGROUP DESTROY": {}, "XGROUP SETID": {}, "XINFO CONSUMERS": {}, "XINFO GROUPS": {},
+	"XINFO STREAM": {}, "XLEN": {}, "XPENDING": {}, "XRANGE": {}, "XREAD": {},
+	"XREADGROUP": {}, "XREVRANGE": {}, "XTRIM": {}, "ZADD": {}, "ZCARD": {}, "ZCOUNT": {},
+	"ZINCRBY": {}, "ZINTER": {}, "ZINTERSTORE": {}, "ZLEXCOUNT": {}, "ZMPOP": {}, "ZMSCORE": {},
+	"ZPOPMAX": {}, "ZPOPMIN": {}, "ZRANDMEMBER": {}, "ZRANGE": {}, "ZRANGEBYLEX": {},
+	"ZRANGEBYSCORE": {}, "ZRANK": {}, "ZREM": {}, "ZREMRANGEBYLEX": {}, "ZREMRANGEBYRANK": {},
+	"ZREMRANGEBYSCORE": {}, "ZREVRANGE": {}, "ZREVRANGEBYLEX": {}, "ZREVRANGEBYSCORE": {},
+	"ZREVRANK": {}, "ZSCAN": {}, "ZSCORE": {}, "ZUNION": {}, "ZUNIONSTORE": {},
+}
+
 type privacyPolicy struct {
-	statement bool
-	caller    bool
-	dbSystem  string
-	custom    map[attribute.Key]struct{}
+	statement        bool
+	commandSpanNames bool
+	caller           bool
+	dbSystem         string
+	custom           map[attribute.Key]struct{}
 }
 
 func safeConfiguredAttributes(attrs []attribute.KeyValue) []attribute.KeyValue {
@@ -40,14 +69,43 @@ func attributeKeys(attrs []attribute.KeyValue) map[attribute.Key]struct{} {
 	return keys
 }
 
-func safeName(name string) string {
+func safeName(name string, exposeOperation bool) string {
 	if name == "redis.dial" {
 		return name
 	}
 	if strings.HasPrefix(name, "redis.pipeline ") {
 		return "redis.pipeline"
 	}
+	if exposeOperation {
+		if operation := safeOperation(name); operation != "" {
+			return "redis." + strings.ReplaceAll(strings.ToLower(operation), " ", ".")
+		}
+	}
 	return "redis.command"
+}
+
+func safeOperation(name string) string {
+	name = strings.TrimSpace(name)
+	if strings.HasPrefix(name, "redis.pipeline ") {
+		return "PIPELINE"
+	}
+	if name == "redis.dial" {
+		return "DIAL"
+	}
+	if name == "" || len(name) > 64 {
+		return ""
+	}
+	for _, char := range name {
+		if (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') &&
+			(char < '0' || char > '9') && char != ' ' && char != '-' && char != '_' && char != '.' {
+			return ""
+		}
+	}
+	operation := strings.ToUpper(strings.Join(strings.Fields(name), " "))
+	if _, ok := safeRedisOperations[operation]; !ok {
+		return ""
+	}
+	return operation
 }
 
 func safeAttributes(attrs []attribute.KeyValue, policy privacyPolicy) []attribute.KeyValue {
@@ -81,8 +139,14 @@ type privateTracer struct {
 
 func (t privateTracer) Start(ctx context.Context, name string, opts ...trace.SpanStartOption) (context.Context, trace.Span) {
 	c := trace.NewSpanStartConfig(opts...)
+	attrs := safeAttributes(c.Attributes(), t.policy)
+	if t.policy.commandSpanNames {
+		if operation := safeOperation(name); operation != "" {
+			attrs = append(attrs, attribute.String("db.operation.name", operation))
+		}
+	}
 	clean := []trace.SpanStartOption{
-		trace.WithAttributes(safeAttributes(c.Attributes(), t.policy)...),
+		trace.WithAttributes(attrs...),
 		trace.WithSpanKind(c.SpanKind()),
 		trace.WithTimestamp(c.Timestamp()),
 	}
@@ -92,7 +156,7 @@ func (t privateTracer) Start(ctx context.Context, name string, opts ...trace.Spa
 	for _, link := range c.Links() {
 		clean = append(clean, trace.WithLinks(trace.Link{SpanContext: link.SpanContext}))
 	}
-	ctx, span := t.Tracer.Start(ctx, safeName(name), clean...)
+	ctx, span := t.Tracer.Start(ctx, safeName(name, t.policy.commandSpanNames), clean...)
 	wrapped := privateSpan{Span: span, provider: t.provider, policy: t.policy}
 	return trace.ContextWithSpan(ctx, wrapped), wrapped
 }
@@ -104,7 +168,14 @@ type privateSpan struct {
 }
 
 func (s privateSpan) TracerProvider() trace.TracerProvider { return s.provider }
-func (s privateSpan) SetName(name string)                  { s.Span.SetName(safeName(name)) }
+func (s privateSpan) SetName(name string) {
+	s.Span.SetName(safeName(name, s.policy.commandSpanNames))
+	if s.policy.commandSpanNames {
+		if operation := safeOperation(name); operation != "" {
+			s.Span.SetAttributes(attribute.String("db.operation.name", operation))
+		}
+	}
+}
 func (s privateSpan) SetAttributes(attrs ...attribute.KeyValue) {
 	s.Span.SetAttributes(safeAttributes(attrs, s.policy)...)
 }
