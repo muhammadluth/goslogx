@@ -2,6 +2,7 @@ package fiber
 
 import (
 	"context"
+	"github.com/muhammadluth/goslogx/internal/integration/privacy"
 	"strings"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -93,7 +94,7 @@ func safeAttributes(input []attribute.KeyValue, policy privacyPolicy) []attribut
 			if a.Value.Type() != attribute.STRING || a.Value.AsString() == "" {
 				continue
 			}
-			a = attribute.String("error.type", "http_error")
+			a = attribute.String("error.type", privacy.ErrorLabel(a.Value.AsString(), "http_error"))
 			output = append(output, a)
 			continue
 		case "http.request.method":
@@ -186,7 +187,7 @@ func (t privateTracer) Start(ctx context.Context, name string, opts ...trace.Spa
 		clean = append(clean, trace.WithNewRoot())
 	}
 	for _, link := range c.Links() {
-		clean = append(clean, trace.WithLinks(trace.Link{SpanContext: link.SpanContext}))
+		clean = append(clean, trace.WithLinks(privacy.Link(link)))
 	}
 	clean = append(clean, t.provider.start...)
 	clean = append(clean, trace.WithAttributes(t.provider.attributes...))
@@ -204,13 +205,19 @@ func (s privateSpan) TracerProvider() trace.TracerProvider { return s.provider }
 func (s privateSpan) SetAttributes(attrs ...attribute.KeyValue) {
 	s.Span.SetAttributes(safeAttributes(attrs, s.provider.policy)...)
 }
-func (s privateSpan) SetStatus(code codes.Code, _ string)     { s.Span.SetStatus(code, "") }
-func (s privateSpan) RecordError(error, ...trace.EventOption) {}
-func (s privateSpan) AddEvent(string, ...trace.EventOption)   {}
-func (s privateSpan) AddLink(link trace.Link) {
-	s.Span.AddLink(trace.Link{SpanContext: link.SpanContext})
+func (s privateSpan) SetStatus(code codes.Code, description string) {
+	s.Span.SetStatus(code, privacy.StatusDescription(code, description))
 }
-func (s privateSpan) End(...trace.SpanEndOption) { s.Span.End() }
+func (s privateSpan) RecordError(err error, opts ...trace.EventOption) {
+	privacy.RecordError(s.Span, err, opts...)
+}
+func (s privateSpan) AddEvent(name string, opts ...trace.EventOption) {
+	privacy.Event(s.Span, name, opts...)
+}
+func (s privateSpan) AddLink(link trace.Link) {
+	s.Span.AddLink(privacy.Link(link))
+}
+func (s privateSpan) End(opts ...trace.SpanEndOption) { privacy.End(s.Span, recover(), opts...) }
 
 type privateMeterProvider struct {
 	metric.MeterProvider

@@ -52,7 +52,7 @@ func TestPropagationPrivacyAndCardinality(t *testing.T) {
 		t.Fatal("handler error lost")
 	}
 	spans := recorder.Ended()
-	if len(spans) != 3 || spans[1].Parent().SpanID() != spans[0].SpanContext().SpanID() || spans[2].Parent().SpanID() != spans[1].SpanContext().SpanID() {
+	if len(spans) != 2 || spans[1].Name() != "nats process" || spans[1].Parent().SpanID() != spans[0].SpanContext().SpanID() {
 		t.Fatalf("chain: %v", spans)
 	}
 	for _, s := range spans {

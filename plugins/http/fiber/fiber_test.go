@@ -122,7 +122,7 @@ func TestTelemetry(t *testing.T) {
 		if s.Status().Code != want {
 			t.Fatal(s.Status())
 		}
-		if s.Status().Description != "" || len(s.Events()) != 0 || strings.Contains(fmt.Sprint(s.Attributes()), "SECRET") {
+		if strings.Contains(fmt.Sprint(s.Attributes(), s.Events(), s.Status()), "SECRET") {
 			t.Fatal("span privacy", s.Attributes(), s.Events(), s.Status())
 		}
 	}

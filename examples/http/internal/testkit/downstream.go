@@ -140,7 +140,7 @@ func RunDownstream(t *testing.T, name string, build Builder) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		var serverSC, producerSC, receiveSC, processSC trace.SpanContext
+		var serverSC, producerSC, processSC trace.SpanContext
 		for _, s := range recorder.Ended() {
 			if s.SpanContext().TraceID().String() != "0123456789abcdef0123456789abcdef" {
 				t.Fatal("trace continuity", s.Name())
@@ -159,7 +159,7 @@ func RunDownstream(t *testing.T, name string, build Builder) {
 			}
 			if s.SpanKind() == trace.SpanKindConsumer {
 				if strings.HasSuffix(s.Name(), " receive") {
-					receiveSC = s.SpanContext()
+					t.Fatal("unexpected synthetic receive span")
 				} else if strings.HasSuffix(s.Name(), " process") {
 					processSC = s.SpanContext()
 				}
@@ -177,11 +177,8 @@ func RunDownstream(t *testing.T, name string, build Builder) {
 				}
 				counts[s.InstrumentationScope().Name]++
 			}
-			if s.SpanContext().SpanID() == processSC.SpanID() && s.Parent().SpanID() != receiveSC.SpanID() {
-				t.Fatal("process parent")
-			}
-			if s.SpanContext().SpanID() == receiveSC.SpanID() && (!s.Parent().IsRemote() || s.Parent().SpanID() != producerSC.SpanID()) {
-				t.Fatal("remote propagation")
+			if s.SpanContext().SpanID() == processSC.SpanID() && (!s.Parent().IsRemote() || s.Parent().SpanID() != producerSC.SpanID()) {
+				t.Fatal("remote process propagation")
 			}
 		}
 		for _, scope := range []string{"github.com/muhammadluth/goslogx/plugins/database/bun", goslogxredis.ScopeName, goslogxnats.ScopeName, goslogxhttp.ScopeName} {

@@ -17,8 +17,12 @@ const ScopeName = "github.com/muhammadluth/goslogx/plugins/database/ent"
 type Option = telemetry.Option
 
 var WithDBName = telemetry.WithDBName
+var WithRawStatement = telemetry.WithRawStatement
 var WithStatementCapture = telemetry.WithStatementCapture
 var WithStatementSanitizer = telemetry.WithStatementSanitizer
+var WithTraceAttributes = telemetry.WithTraceAttributes
+var WithMetricAttributes = telemetry.WithMetricAttributes
+var WithPropagator = telemetry.WithPropagator
 var WithTracing = telemetry.WithTracing
 var WithMetrics = telemetry.WithMetrics
 

@@ -40,6 +40,11 @@ jobs:
           cache-dependency-path: ${{ matrix.module }}/go.sum
       - name: Check formatting
         run: test -z "$(gofmt -l .)"
+      - name: Isolate local module dependencies
+        run: |
+          python3 "$GITHUB_WORKSPACE/scripts/module-workspace.py" '${{ matrix.module }}' "$RUNNER_TEMP/module.work"
+          echo "GOWORK=$RUNNER_TEMP/module.work" >> "$GITHUB_ENV"
+          echo "GOTOOLCHAIN=go${{ matrix.go }}" >> "$GITHUB_ENV"
       - name: Check dependencies
         run: |
           go mod tidy
@@ -55,7 +60,7 @@ jobs:
       - name: Test
         run: go test ./...
       - name: Race and coverage
-        run: go test -race -coverprofile=coverage.txt -covermode=atomic ./...
+        run: go test -race -coverpkg=github.com/muhammadluth/goslogx/... -coverprofile=coverage.txt -covermode=atomic ./...
       - name: Upload coverage
         uses: codecov/codecov-action@v5
         with:

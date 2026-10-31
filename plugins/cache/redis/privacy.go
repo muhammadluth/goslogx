@@ -2,40 +2,13 @@ package redis
 
 import (
 	"context"
+	"github.com/muhammadluth/goslogx/internal/integration/privacy"
 	"strings"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
-
-var safeRedisOperations = map[string]struct{}{
-	"APPEND": {}, "BITCOUNT": {}, "BITOP": {}, "BLMOVE": {}, "BLPOP": {}, "BRPOP": {},
-	"BZPOPMAX": {}, "BZPOPMIN": {}, "CLIENT INFO": {}, "CLIENT SETINFO": {}, "DECR": {},
-	"DECRBY": {}, "DEL": {}, "EXISTS": {}, "EXPIRE": {}, "EXPIREAT": {}, "GET": {},
-	"GETDEL": {}, "GETEX": {}, "GETRANGE": {}, "GETSET": {}, "HDEL": {}, "HEXISTS": {},
-	"HGET": {}, "HGETALL": {}, "HINCRBY": {}, "HINCRBYFLOAT": {}, "HKEYS": {}, "HLEN": {},
-	"HMGET": {}, "HMSET": {}, "HSCAN": {}, "HSET": {}, "HSETNX": {}, "HVALS": {},
-	"INCR": {}, "INCRBY": {}, "INCRBYFLOAT": {}, "LINSERT": {}, "LLEN": {}, "LMOVE": {},
-	"LPOP": {}, "LPOS": {}, "LPUSH": {}, "LPUSHX": {}, "LRANGE": {}, "LREM": {},
-	"LSET": {}, "LTRIM": {}, "MGET": {}, "MSET": {}, "MSETNX": {}, "PERSIST": {},
-	"PEXPIRE": {}, "PEXPIREAT": {}, "PFADD": {}, "PFCOUNT": {}, "PFMERGE": {}, "PING": {},
-	"PUBLISH": {}, "RANDOMKEY": {}, "RENAME": {}, "RENAMENX": {}, "RPOP": {}, "RPOPLPUSH": {},
-	"RPUSH": {}, "RPUSHX": {}, "SADD": {}, "SCAN": {}, "SCARD": {}, "SDIFF": {},
-	"SDIFFSTORE": {}, "SET": {}, "SETEX": {}, "SETNX": {}, "SINTER": {}, "SINTERSTORE": {},
-	"SISMEMBER": {}, "SMEMBERS": {}, "SMISMEMBER": {}, "SMOVE": {}, "SPOP": {}, "SRANDMEMBER": {},
-	"SREM": {}, "SSCAN": {}, "STRLEN": {}, "SUNION": {}, "SUNIONSTORE": {}, "TTL": {},
-	"TYPE": {}, "UNLINK": {}, "XACK": {}, "XADD": {}, "XAUTOCLAIM": {}, "XCLAIM": {},
-	"XDEL": {}, "XGROUP CREATE": {}, "XGROUP CREATECONSUMER": {}, "XGROUP DELCONSUMER": {},
-	"XGROUP DESTROY": {}, "XGROUP SETID": {}, "XINFO CONSUMERS": {}, "XINFO GROUPS": {},
-	"XINFO STREAM": {}, "XLEN": {}, "XPENDING": {}, "XRANGE": {}, "XREAD": {},
-	"XREADGROUP": {}, "XREVRANGE": {}, "XTRIM": {}, "ZADD": {}, "ZCARD": {}, "ZCOUNT": {},
-	"ZINCRBY": {}, "ZINTER": {}, "ZINTERSTORE": {}, "ZLEXCOUNT": {}, "ZMPOP": {}, "ZMSCORE": {},
-	"ZPOPMAX": {}, "ZPOPMIN": {}, "ZRANDMEMBER": {}, "ZRANGE": {}, "ZRANGEBYLEX": {},
-	"ZRANGEBYSCORE": {}, "ZRANK": {}, "ZREM": {}, "ZREMRANGEBYLEX": {}, "ZREMRANGEBYRANK": {},
-	"ZREMRANGEBYSCORE": {}, "ZREVRANGE": {}, "ZREVRANGEBYLEX": {}, "ZREVRANGEBYSCORE": {},
-	"ZREVRANK": {}, "ZSCAN": {}, "ZSCORE": {}, "ZUNION": {}, "ZUNIONSTORE": {},
-}
 
 type privacyPolicy struct {
 	statement        bool
@@ -69,17 +42,13 @@ func attributeKeys(attrs []attribute.KeyValue) map[attribute.Key]struct{} {
 	return keys
 }
 
+// Native redisotel names contain operations, not command arguments.
 func safeName(name string, exposeOperation bool) string {
-	if name == "redis.dial" {
+	if exposeOperation || name == "redis.dial" {
 		return name
 	}
 	if strings.HasPrefix(name, "redis.pipeline ") {
 		return "redis.pipeline"
-	}
-	if exposeOperation {
-		if operation := safeOperation(name); operation != "" {
-			return "redis." + strings.ReplaceAll(strings.ToLower(operation), " ", ".")
-		}
 	}
 	return "redis.command"
 }
@@ -102,9 +71,6 @@ func safeOperation(name string) string {
 		}
 	}
 	operation := strings.ToUpper(strings.Join(strings.Fields(name), " "))
-	if _, ok := safeRedisOperations[operation]; !ok {
-		return ""
-	}
 	return operation
 }
 
@@ -113,7 +79,13 @@ func safeAttributes(attrs []attribute.KeyValue, policy privacyPolicy) []attribut
 	for _, attr := range attrs {
 		key := string(attr.Key)
 		_, custom := policy.custom[attr.Key]
-		if custom || (key == "db.redis.num_cmd" && attr.Value.Type() == attribute.INT64 && attr.Value.AsInt64() >= 0) ||
+		if key == "db.connection_string" {
+			if endpoint := privacy.ConnectionString(attr.Value.AsString()); endpoint != "" {
+				result = append(result, attribute.String(key, endpoint))
+			}
+			continue
+		}
+		if custom || key == "db.system.name" || key == "server.address" || key == "server.port" || (key == "db.redis.num_cmd" && attr.Value.Type() == attribute.INT64 && attr.Value.AsInt64() >= 0) ||
 			(policy.statement && key == "db.statement") ||
 			(policy.caller && (key == "code.function" || key == "code.filepath" || key == "code.lineno")) {
 			result = append(result, attr)
@@ -154,7 +126,7 @@ func (t privateTracer) Start(ctx context.Context, name string, opts ...trace.Spa
 		clean = append(clean, trace.WithNewRoot())
 	}
 	for _, link := range c.Links() {
-		clean = append(clean, trace.WithLinks(trace.Link{SpanContext: link.SpanContext}))
+		clean = append(clean, trace.WithLinks(privacy.Link(link)))
 	}
 	ctx, span := t.Tracer.Start(ctx, safeName(name, t.policy.commandSpanNames), clean...)
 	wrapped := privateSpan{Span: span, provider: t.provider, policy: t.policy}
@@ -179,9 +151,17 @@ func (s privateSpan) SetName(name string) {
 func (s privateSpan) SetAttributes(attrs ...attribute.KeyValue) {
 	s.Span.SetAttributes(safeAttributes(attrs, s.policy)...)
 }
-func (s privateSpan) SetStatus(code codes.Code, _ string)     { s.Span.SetStatus(code, "") }
-func (s privateSpan) RecordError(error, ...trace.EventOption) {}
-func (s privateSpan) AddEvent(string, ...trace.EventOption)   {}
-func (s privateSpan) AddLink(link trace.Link) {
-	s.Span.AddLink(trace.Link{SpanContext: link.SpanContext})
+func (s privateSpan) SetStatus(code codes.Code, description string) {
+	s.Span.SetStatus(code, privacy.StatusDescription(code, description))
 }
+func (s privateSpan) RecordError(err error, opts ...trace.EventOption) {
+	privacy.RecordError(s.Span, err, opts...)
+}
+func (s privateSpan) AddEvent(name string, opts ...trace.EventOption) {
+	privacy.Event(s.Span, name, opts...)
+}
+func (s privateSpan) AddLink(link trace.Link) {
+	s.Span.AddLink(privacy.Link(link))
+}
+
+func (s privateSpan) End(opts ...trace.SpanEndOption) { privacy.End(s.Span, recover(), opts...) }

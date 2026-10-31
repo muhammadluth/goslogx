@@ -28,7 +28,7 @@ func TestHooksProvidersAndPrivacy(t *testing.T) {
 	batch := hook.TraceBatchStart(ctx, nil, native.TraceBatchStartData{})
 	hook.TraceBatchQuery(batch, nil, native.TraceBatchQueryData{SQL: "UPDATE secret SET token='SECRET'"})
 	hook.TraceBatchEnd(batch, nil, native.TraceBatchEndData{})
-	copyCtx := hook.TraceCopyFromStart(ctx, nil, native.TraceCopyFromStartData{TableName: native.Identifier{"SECRET"}})
+	copyCtx := hook.TraceCopyFromStart(ctx, nil, native.TraceCopyFromStartData{TableName: native.Identifier{"users"}})
 	hook.TraceCopyFromEnd(copyCtx, nil, native.TraceCopyFromEndData{})
 	parent.End()
 	spans := p.Recorder.Ended()

@@ -20,8 +20,12 @@ const ScopeName = "github.com/muhammadluth/goslogx/plugins/database/clickhouse"
 type Option = telemetry.Option
 
 var WithDBName = telemetry.WithDBName
+var WithRawStatement = telemetry.WithRawStatement
 var WithStatementCapture = telemetry.WithStatementCapture
 var WithStatementSanitizer = telemetry.WithStatementSanitizer
+var WithTraceAttributes = telemetry.WithTraceAttributes
+var WithMetricAttributes = telemetry.WithMetricAttributes
+var WithPropagator = telemetry.WithPropagator
 var WithTracing = telemetry.WithTracing
 var WithMetrics = telemetry.WithMetrics
 
@@ -71,7 +75,7 @@ func (c *Conn) Query(ctx context.Context, q string, args ...any) (driver.Rows, e
 		end(err)
 		return r, err
 	}
-	return &rows{r, end}, nil
+	return &rows{Rows: r, lifetime: lifetime{end: end}}, nil
 }
 func (c *Conn) QueryRow(ctx context.Context, q string, args ...any) driver.Row {
 	ctx, end := c.start(ctx, q)
@@ -84,7 +88,7 @@ func (c *Conn) PrepareBatch(ctx context.Context, q string, opts ...driver.Prepar
 		end(err)
 		return b, err
 	}
-	return &batch{Batch: b, end: end}, nil
+	return &batch{Batch: b, lifetime: lifetime{end: end}}, nil
 }
 func (c *Conn) Ping(ctx context.Context) error {
 	ctx, end := c.start(ctx, "PING")
@@ -114,40 +118,43 @@ func (c *Conn) QueryFormat(ctx context.Context, format, q string, args ...any) (
 	return &stream{r, end}, nil
 }
 
+// lifetime retains the first recoverable read/append error until the native
+// cursor or batch is actually finished. A scan error does not close a cursor.
+type lifetime struct {
+	end     func(error)
+	failure error
+}
+
+func (l *lifetime) remember(err error) {
+	if l.failure == nil {
+		l.failure = err
+	}
+}
+func (l *lifetime) finish(err error) { l.remember(err); l.end(l.failure) }
+
 type rows struct {
 	driver.Rows
-	end func(error)
+	lifetime
 }
 
 func (r *rows) Next() bool {
 	ok := r.Rows.Next()
 	if !ok {
-		r.end(r.Rows.Err())
+		r.finish(r.Rows.Err())
 	}
 	return ok
 }
 func (r *rows) Close() error {
 	err := r.Rows.Close()
-	if err == nil {
-		err = r.Rows.Err()
+	recorded := err
+	if recorded == nil {
+		recorded = r.Rows.Err()
 	}
-	r.end(err)
+	r.finish(recorded)
 	return err
 }
-func (r *rows) Scan(v ...any) error {
-	err := r.Rows.Scan(v...)
-	if err != nil {
-		r.end(err)
-	}
-	return err
-}
-func (r *rows) ScanStruct(v any) error {
-	err := r.Rows.ScanStruct(v)
-	if err != nil {
-		r.end(err)
-	}
-	return err
-}
+func (r *rows) Scan(v ...any) error    { err := r.Rows.Scan(v...); r.remember(err); return err }
+func (r *rows) ScanStruct(v any) error { err := r.Rows.ScanStruct(v); r.remember(err); return err }
 
 type row struct {
 	driver.Row
@@ -166,52 +173,34 @@ func (r *row) Err() error {
 
 type batch struct {
 	driver.Batch
-	end func(error)
+	lifetime
 }
 
-func (b *batch) Send() error  { err := b.Batch.Send(); b.end(err); return err }
-func (b *batch) Abort() error { err := b.Batch.Abort(); b.end(err); return err }
-func (b *batch) Close() error { err := b.Batch.Close(); b.end(err); return err }
-func (b *batch) Append(v ...any) error {
-	err := b.Batch.Append(v...)
-	if err != nil {
-		b.end(err)
-	}
-	return err
-}
+func (b *batch) Send() error           { err := b.Batch.Send(); b.finish(err); return err }
+func (b *batch) Abort() error          { err := b.Batch.Abort(); b.finish(err); return err }
+func (b *batch) Close() error          { err := b.Batch.Close(); b.finish(err); return err }
+func (b *batch) Append(v ...any) error { err := b.Batch.Append(v...); b.remember(err); return err }
 func (b *batch) AppendStruct(v any) error {
 	err := b.Batch.AppendStruct(v)
-	if err != nil {
-		b.end(err)
-	}
+	b.remember(err)
 	return err
 }
-func (b *batch) Flush() error {
-	err := b.Batch.Flush()
-	if err != nil {
-		b.end(err)
-	}
-	return err
-}
-func (b *batch) Column(i int) driver.BatchColumn { return &column{b.Batch.Column(i), b.end} }
+func (b *batch) Flush() error                    { err := b.Batch.Flush(); b.remember(err); return err }
+func (b *batch) Column(i int) driver.BatchColumn { return &column{b.Batch.Column(i), &b.lifetime} }
 
 type column struct {
 	driver.BatchColumn
-	end func(error)
+	lifetime *lifetime
 }
 
 func (c *column) Append(v any) error {
 	err := c.BatchColumn.Append(v)
-	if err != nil {
-		c.end(err)
-	}
+	c.lifetime.remember(err)
 	return err
 }
 func (c *column) AppendRow(v any) error {
 	err := c.BatchColumn.AppendRow(v)
-	if err != nil {
-		c.end(err)
-	}
+	c.lifetime.remember(err)
 	return err
 }
 
@@ -233,7 +222,7 @@ func (s *stream) Close() error { err := s.ReadCloser.Close(); s.end(err); return
 
 // ObservePool observes local driver statistics; it never polls a server.
 func (c *Conn) ObservePool() error {
-	attrs := []attribute.KeyValue{attribute.String("db.system.name", "clickhouse")}
+	attrs := append([]attribute.KeyValue{attribute.String("db.system.name", "clickhouse")}, c.t.Config.MetricAttributes...)
 	if c.t.Config.Namespace != "" {
 		attrs = append(attrs, attribute.String("db.namespace", c.t.Config.Namespace))
 	}

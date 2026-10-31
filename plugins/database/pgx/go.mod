@@ -3,6 +3,7 @@ module github.com/muhammadluth/goslogx/plugins/database/pgx
 go 1.26.0
 
 require (
+	github.com/exaring/otelpgx v0.13.0
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/muhammadluth/goslogx v1.3.0
 	go.opentelemetry.io/otel v1.47.0

@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"errors"
+	"go.opentelemetry.io/otel"
 	"reflect"
 	"strings"
 
@@ -70,10 +71,8 @@ func WithPoolName(name string) Option { return func(c *config) { c.poolName = na
 // values and is disabled by default.
 func WithDBStatement(enabled bool) Option { return func(c *config) { c.dbStatement = enabled } }
 
-// WithCommandSpanNames exposes only the bounded Redis operation name in the
-// span name and db.operation.name attribute. Command arguments, keys, and
-// values remain excluded. It is enabled by default; disable it to retain the
-// legacy fixed redis.command name.
+// WithCommandSpanNames preserves native redisotel operation names (the default).
+// Deprecated: disabling names exists only for legacy dashboards. Use native names.
 func WithCommandSpanNames(enabled bool) Option {
 	return func(c *config) { c.commandSpanNames = enabled }
 }
@@ -110,7 +109,9 @@ func WithCloseChan(ch chan struct{}) Option {
 	return func(c *config) { c.closeChan = ch }
 }
 
-func Instrument(client goredis.UniversalClient, provider goslogx.TelemetryProvider, opts ...Option) error {
+// Instrument installs hooks once per client. Repeated calls return the initial
+// result and do not change providers or options. Instrument before first use.
+func Instrument(client goredis.UniversalClient, provider goslogx.TelemetryProvider, opts ...Option) (err error) {
 	if isNil(client) {
 		return errors.New("redis instrumentation: nil client")
 	}
@@ -144,6 +145,12 @@ func Instrument(client goredis.UniversalClient, provider goslogx.TelemetryProvid
 	if !c.tracing && !c.metrics {
 		return nil
 	}
+	registration, first := registerClient(client)
+	if !first {
+		<-registration.done
+		return registration.err
+	}
+	defer func() { registration.err = err; close(registration.done) }()
 	c.attributes = safeConfiguredAttributes(c.attributes)
 	common := []redisotel.Option{
 		redisotel.WithDBSystem(c.dbSystem),
@@ -208,8 +215,12 @@ func Instrument(client goredis.UniversalClient, provider goslogx.TelemetryProvid
 			return err
 		}
 		ring.OnNewNode(func(node *goredis.Client) {
-			if err := initialize(node); err != nil && c.onError != nil {
-				c.onError(err)
+			if err := initialize(node); err != nil {
+				if c.onError != nil {
+					c.onError(err)
+				} else {
+					otel.Handle(err)
+				}
 			}
 		})
 		return nil

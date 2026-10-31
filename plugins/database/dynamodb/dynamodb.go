@@ -16,31 +16,28 @@ import (
 
 const ScopeName = "github.com/muhammadluth/goslogx/plugins/database/dynamodb"
 
-type Option = telemetry.Option
-
-var WithDBName = telemetry.WithDBName
-var WithTracing = telemetry.WithTracing
-var WithMetrics = telemetry.WithMetrics
-
 // Instrument applies to clients subsequently constructed from cfg. Use a config
 // dedicated to DynamoDB. SDK signing, credential resolution and retries remain native.
 func Instrument(cfg *aws.Config, p goslogx.TelemetryProvider, opts ...Option) error {
 	if cfg == nil {
 		return errors.New("dynamodb: nil AWS config")
 	}
-	t, err := telemetry.New(p, ScopeName, "aws.dynamodb", false, opts...)
+	local := config{}
+	telemetry.ApplyOptions(&local.Config, &local, opts...)
+	t, err := telemetry.New(p, ScopeName, "aws.dynamodb", false, func(c *telemetry.Config) { *c = local.Config })
 	if err != nil {
 		return err
 	}
 	tp, _, prop := telemetry.Resolve(p, t.Config)
 	var nativeOptions []func(*middleware.Stack) error
-	otelaws.AppendMiddlewares(&nativeOptions, otelaws.WithTracerProvider(telemetry.SafeDBProvider(tp, ScopeName)), otelaws.WithTextMapPropagator(prop), otelaws.WithAttributeBuilder(func(ctx context.Context, _ middleware.InitializeInput, _ middleware.InitializeOutput) []attribute.KeyValue {
+	builders := append([]otelaws.AttributeBuilder{otelaws.DefaultAttributeBuilder}, local.builders...)
+	otelaws.AppendMiddlewares(&nativeOptions, otelaws.WithTracerProvider(telemetry.ConfiguredDBProvider(tp, ScopeName, t.Config)), otelaws.WithTextMapPropagator(prop), otelaws.WithAttributeBuilder(append(builders, func(ctx context.Context, _ middleware.InitializeInput, _ middleware.InitializeOutput) []attribute.KeyValue {
 		a := []attribute.KeyValue{attribute.String("db.system.name", "aws.dynamodb"), attribute.String("db.operation.name", telemetry.DBOperation(awsmiddleware.GetOperationName(ctx)))}
 		if t.Config.Namespace != "" {
 			a = append(a, attribute.String("db.namespace", t.Config.Namespace))
 		}
 		return a
-	}))
+	})...))
 	cfg.APIOptions = append(cfg.APIOptions, func(stack *middleware.Stack) error {
 		if _, ok := stack.Initialize.Get(ScopeName); ok {
 			return errors.New("dynamodb: already instrumented")

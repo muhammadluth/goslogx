@@ -39,7 +39,7 @@ const (
 
 func Middleware(provider goslogx.TelemetryProvider, opts ...Option) func(http.Handler) http.Handler {
 	c := httptelemetry.NewConfig(opts...)
-	p := httptelemetry.Resolve(provider, ScopeName, c)
+	p := httptelemetry.ResolveForDelegation(provider, ScopeName, c)
 	return func(next http.Handler) http.Handler {
 		observed := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			defer func() {
@@ -64,7 +64,17 @@ func Middleware(provider goslogx.TelemetryProvider, opts ...Option) func(http.Ha
 			}()
 			next.ServeHTTP(w, r)
 		})
-		options := []base.Option{base.WithRequestFilter(c.Filter)}
+		options := []base.Option{base.WithRequestFilter(c.Filter), base.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+			route := ""
+			if rc := chi.RouteContext(r.Context()); rc != nil {
+				route = rc.RoutePattern()
+			}
+			if c.SpanName != nil {
+				return c.SpanName(route, r)
+			}
+			return httptelemetry.Name(r.Method, route)
+		})}
+		options = append(options, base.WithTraceAttributes(c.TraceAttributes...), base.WithMetricAttributes(c.MetricAttributes...), base.WithSpanStartOptions(c.Start...), base.WithServerName(c.ServerName))
 		if c.Public {
 			options = append(options, base.WithPublicEndpoint())
 		} else if c.PublicEndpointFn != nil {

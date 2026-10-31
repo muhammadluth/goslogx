@@ -2,7 +2,7 @@ package grpc
 
 import (
 	"context"
-	"strings"
+	"github.com/muhammadluth/goslogx/internal/integration/privacy"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -28,7 +28,7 @@ func clean(input []attribute.KeyValue, c config) []attribute.KeyValue {
 				out = append(out, a)
 			}
 		case "error.type":
-			out = append(out, attribute.String("error.type", "grpc_error"))
+			out = append(out, attribute.String("error.type", privacy.ErrorLabel(a.Value.AsString(), "grpc_error")))
 		}
 	}
 	if c.methods[service+"/"+method] {
@@ -43,23 +43,6 @@ func safeMetricAttributes(input []attribute.KeyValue) []attribute.KeyValue {
 		switch a.Key {
 		case "app.channel", "service.version", "deployment.environment.name":
 			if a.Value.Type() == attribute.STRING && len(a.Value.AsString()) <= 128 {
-				out = append(out, a)
-			}
-		}
-	}
-	return out
-}
-
-func safeMessageAttributes(input []attribute.KeyValue) []attribute.KeyValue {
-	out := make([]attribute.KeyValue, 0, len(input))
-	for _, a := range input {
-		switch a.Key {
-		case "rpc.message.type":
-			if a.Value.Type() == attribute.STRING && (a.Value.AsString() == "SENT" || a.Value.AsString() == "RECEIVED") {
-				out = append(out, a)
-			}
-		case "rpc.message.id", "rpc.message.compressed_size", "rpc.message.uncompressed_size":
-			if a.Value.Type() == attribute.INT64 && a.Value.AsInt64() >= 0 {
 				out = append(out, a)
 			}
 		}
@@ -83,17 +66,13 @@ type privateTracer struct {
 
 func (t privateTracer) Start(ctx context.Context, name string, opts ...trace.SpanStartOption) (context.Context, trace.Span) {
 	c := trace.NewSpanStartConfig(opts...)
-	name = strings.TrimPrefix(name, "/")
-	if !t.p.c.methods[name] {
-		name = "gRPC"
-	}
-	attrs := append(clean(c.Attributes(), t.p.c), t.p.c.traceAttrs...)
+	attrs := append(privacy.Attributes(c.Attributes()), t.p.c.traceAttrs...)
 	safe := []trace.SpanStartOption{trace.WithSpanKind(c.SpanKind()), trace.WithTimestamp(c.Timestamp()), trace.WithAttributes(attrs...)}
 	if c.NewRoot() {
 		safe = append(safe, trace.WithNewRoot())
 	}
 	for _, link := range c.Links() {
-		safe = append(safe, trace.WithLinks(trace.Link{SpanContext: link.SpanContext}))
+		safe = append(safe, trace.WithLinks(privacy.Link(link)))
 	}
 	ctx, s := t.Tracer.Start(ctx, name, safe...)
 	wrapped := privateSpan{s, t.p}
@@ -105,23 +84,24 @@ type privateSpan struct {
 	p privateTP
 }
 
-func (s privateSpan) TracerProvider() trace.TracerProvider  { return s.p }
-func (s privateSpan) SetAttributes(a ...attribute.KeyValue) { s.Span.SetAttributes(clean(a, s.p.c)...) }
-func (s privateSpan) SetStatus(code codes.Code, _ string)   { s.Span.SetStatus(code, "") }
-func (s privateSpan) RecordError(err error, _ ...trace.EventOption) {
-	if err != nil {
-		s.Span.SetAttributes(attribute.String("error.type", "grpc_error"))
-	}
+func (s privateSpan) TracerProvider() trace.TracerProvider { return s.p }
+func (s privateSpan) SetAttributes(a ...attribute.KeyValue) {
+	s.Span.SetAttributes(privacy.Attributes(a)...)
+}
+func (s privateSpan) SetStatus(code codes.Code, description string) {
+	s.Span.SetStatus(code, privacy.StatusDescription(code, description))
+}
+func (s privateSpan) RecordError(err error, opts ...trace.EventOption) {
+	privacy.RecordError(s.Span, err, opts...)
 }
 func (s privateSpan) AddEvent(name string, opts ...trace.EventOption) {
-	if name != "message" || len(s.p.c.messageEvents) == 0 {
+	if name == "message" && len(s.p.c.messageEvents) == 0 {
 		return
 	}
-	c := trace.NewEventConfig(opts...)
-	s.Span.AddEvent("message", trace.WithTimestamp(c.Timestamp()), trace.WithAttributes(safeMessageAttributes(c.Attributes())...))
+	privacy.Event(s.Span, name, opts...)
 }
 func (s privateSpan) AddLink(link trace.Link) {
-	s.Span.AddLink(trace.Link{SpanContext: link.SpanContext})
+	s.Span.AddLink(privacy.Link(link))
 }
 
 type privateMP struct {
@@ -177,3 +157,5 @@ type intHistogram struct {
 func (h intHistogram) Record(ctx context.Context, value int64, opts ...metric.RecordOption) {
 	h.Int64Histogram.Record(ctx, value, metricOptions(opts, h.c)...)
 }
+
+func (s privateSpan) End(opts ...trace.SpanEndOption) { privacy.End(s.Span, recover(), opts...) }

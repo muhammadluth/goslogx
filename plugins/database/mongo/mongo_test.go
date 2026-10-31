@@ -21,12 +21,12 @@ func TestContribMonitorPrivacyAndPool(t *testing.T) {
 		t.Fatal("existing monitors overwritten")
 	}
 	ctx, parent := p.TP.Tracer("application").Start(context.Background(), "request")
-	document, err := bson.Marshal(bson.D{{Key: "find", Value: "SECRET"}, {Key: "filter", Value: bson.D{{Key: "password", Value: "SECRET"}}}})
+	document, err := bson.Marshal(bson.D{{Key: "find", Value: "users"}, {Key: "filter", Value: bson.D{{Key: "password", Value: "SECRET"}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	config.Monitor.Started(ctx, &event.CommandStartedEvent{Command: document, DatabaseName: "SECRET", CommandName: "find", RequestID: 1, ConnectionID: "SECRET:27017[-1]"})
-	config.Monitor.Failed(ctx, &event.CommandFailedEvent{CommandFinishedEvent: event.CommandFinishedEvent{RequestID: 1, CommandName: "find", DatabaseName: "SECRET", ConnectionID: "SECRET:27017[-1]", Duration: time.Millisecond}, Failure: errors.New("SECRET")})
+	config.Monitor.Started(ctx, &event.CommandStartedEvent{Command: document, DatabaseName: "SECRET", CommandName: "find", RequestID: 1, ConnectionID: "mongo.internal:27017[-1]"})
+	config.Monitor.Failed(ctx, &event.CommandFailedEvent{CommandFinishedEvent: event.CommandFinishedEvent{RequestID: 1, CommandName: "find", DatabaseName: "SECRET", ConnectionID: "mongo.internal:27017[-1]", Duration: time.Millisecond}, Failure: errors.New("SECRET")})
 	config.PoolMonitor.Event(&event.PoolEvent{Type: event.ConnectionReady, Address: "SECRET", ConnectionID: 1})
 	config.PoolMonitor.Event(&event.PoolEvent{Type: event.ConnectionCheckedOut, Address: "SECRET", ConnectionID: 1})
 	config.PoolMonitor.Event(&event.PoolEvent{Type: event.ConnectionClosed, Address: "SECRET", ConnectionID: 1})

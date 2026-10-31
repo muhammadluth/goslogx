@@ -4,15 +4,22 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"github.com/muhammadluth/goslogx/internal/integration/privacy"
 	"reflect"
+	"runtime"
+	"sync"
 	"time"
+	"weak"
 
 	"github.com/muhammadluth/goslogx"
+	"github.com/muhammadluth/goslogx/internal/integration/telemetry"
 	upbun "github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect"
+	"github.com/uptrace/bun/extra/bunotel"
+	upotelsql "github.com/uptrace/opentelemetry-go-extra/otelsql"
 
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/trace"
@@ -24,9 +31,13 @@ const instrumentationScope = "github.com/muhammadluth/goslogx/plugins/database/b
 type Option func(*config)
 
 type config struct {
-	attributes []attribute.KeyValue
-	statement  bool
-	poolName   string
+	attributes    []attribute.KeyValue
+	statement     bool
+	policy        telemetry.Config
+	caller        bool
+	legacyMetrics bool
+	poolName      string
+	formatter     func(*upbun.QueryEvent) string
 }
 
 // WithPoolName distinguishes application-owned pools using a fixed name.
@@ -48,22 +59,16 @@ func WithDBName(name string) Option {
 
 func WithAttributes(attributes ...attribute.KeyValue) Option {
 	copied := append([]attribute.KeyValue(nil), attributes...)
-	return func(c *config) {
-		for _, a := range copied {
-			if a.Key == "db.namespace" && a.Value.Type() == attribute.STRING && len(a.Value.AsString()) <= 256 {
-				c.attributes = append(c.attributes, a)
-			}
-		}
-	}
+	return func(c *config) { c.attributes = append(c.attributes, privacy.Attributes(copied)...) }
 }
 
-// WithQueryStatement(false) preserves the privacy-safe default. Enabling capture
-// returns a configuration error: the plugin does not collect SQL or arguments.
+// WithQueryStatement enables capture requiring WithStatementSanitizer.
+// Use WithRawStatement for deliberately unsanitized diagnostic capture.
 func WithQueryStatement(enabled bool) Option {
 	return func(c *config) { c.statement = enabled }
 }
 
-func Instrument(db *upbun.DB, provider goslogx.TelemetryProvider, opts ...Option) error {
+func Instrument(db *upbun.DB, provider goslogx.TelemetryProvider, opts ...Option) (err error) {
 	if db == nil {
 		return errors.New("bun instrumentation: nil database")
 	}
@@ -83,54 +88,89 @@ func Instrument(db *upbun.DB, provider goslogx.TelemetryProvider, opts ...Option
 			opt(&c)
 		}
 	}
-	if c.statement {
-		return errors.New("database instrumentation: SQL capture is unsupported; use application-controlled sanitized span attributes")
+	c.policy.StatementCapture = c.statement || c.policy.StatementCapture
+	if c.policy.StatementCapture && c.policy.StatementSanitizer == nil && !c.policy.RawStatement {
+		return errors.New("database instrumentation: statement capture requires a sanitizer")
 	}
+	if c.policy.TracingDisabled {
+		tp = tracenoop.NewTracerProvider()
+	}
+	if c.policy.MetricsDisabled {
+		mp = metricnoop.NewMeterProvider()
+	}
+	key := weak.Make(db)
+	if _, loaded := registered.LoadOrStore(key, struct{}{}); loaded {
+		return errors.New("bun instrumentation: database already instrumented")
+	}
+	defer func() {
+		if err != nil {
+			registered.Delete(key)
+		}
+	}()
+	runtime.AddCleanup(db, func(key weak.Pointer[upbun.DB]) { registered.Delete(key) }, key)
 	meter := mp.Meter(instrumentationScope)
-	duration, err := meter.Float64Histogram("db.client.operation.duration", metric.WithUnit("s"), metric.WithDescription("Database operation duration."), metric.WithExplicitBucketBoundaries(.001, .005, .01, .05, .1, .5, 1, 5, 10))
-	if err != nil {
+	metricAttrs := append(append([]attribute.KeyValue(nil), c.attributes...), c.policy.MetricAttributes...)
+	var duration metric.Float64Histogram
+	if c.legacyMetrics {
+		var err error
+		duration, err = meter.Float64Histogram("db.client.operation.duration", metric.WithUnit("s"))
+		if err != nil {
+			return err
+		}
+		poolAttrs := append(append([]attribute.KeyValue(nil), metricAttrs...), attribute.String("db.client.connection.pool.name", c.poolName))
+		if err := observePool(meter, db, poolAttrs); err != nil {
+			return err
+		}
+	}
+	var initErr error
+	formatter := c.formatter
+	if formatter == nil {
+		formatter = func(event *upbun.QueryEvent) string { return safeOperation(event.Operation()) }
+	}
+	hook := queryHook{bunotel.NewQueryHook(
+		bunotel.WithTracerProvider(privateTracerProvider{TracerProvider: tp, config: c}),
+		bunotel.WithMeterProvider(scopedMeterProvider{MeterProvider: mp, attributes: c.policy.MetricAttributes, initErr: &initErr}),
+		bunotel.WithAttributes(c.attributes...),
+		bunotel.WithFormattedQueries(c.policy.RawStatement || c.policy.StatementSanitizer != nil),
+		bunotel.WithSpanNameQueryGen(formatter),
+	)}
+	if initErr != nil {
+		return initErr
+	}
+	if err := upstreamPool(db, scopedMeterProvider{MeterProvider: mp, attributes: c.policy.MetricAttributes}, metricAttrs); err != nil {
 		return err
 	}
-	poolAttributes := append(append([]attribute.KeyValue(nil), c.attributes...), attribute.String("db.client.connection.pool.name", c.poolName))
-	if err := observePool(meter, db, poolAttributes); err != nil {
-		return err
+	db.AddQueryHook(hook)
+	// bunotel owns tracing and its upstream compatibility metrics. Keep the
+	// stable goslogx semconv histogram as a metrics-only hook for existing users.
+	if c.legacyMetrics {
+		db.AddQueryHook(&metricsHook{duration: duration, attributes: metricAttrs})
 	}
-	db.AddQueryHook(&queryHook{tracer: tp.Tracer(instrumentationScope), duration: duration, attributes: c.attributes})
 	return nil
 }
 
-type queryHook struct {
-	tracer     trace.Tracer
+type metricsHook struct {
 	duration   metric.Float64Histogram
 	attributes []attribute.KeyValue
 }
 
-func (*queryHook) Init(*upbun.DB) {}
+func (*metricsHook) Init(*upbun.DB) {}
 
-func (h *queryHook) BeforeQuery(ctx context.Context, event *upbun.QueryEvent) context.Context {
-	operation := safeOperation(event.Operation())
-	if operation == "" {
-		operation = "QUERY"
-	}
-	ctx, _ = h.tracer.Start(ctx, safeOperation(operation), trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(h.spanAttributes(event, operation)...))
+func (h *metricsHook) BeforeQuery(ctx context.Context, _ *upbun.QueryEvent) context.Context {
 	return ctx
 }
 
-func (h *queryHook) AfterQuery(ctx context.Context, event *upbun.QueryEvent) {
-	span := trace.SpanFromContext(ctx)
+func (h *metricsHook) AfterQuery(ctx context.Context, event *upbun.QueryEvent) {
 	attrs := h.spanAttributes(event, safeOperation(event.Operation()))
 	if event.Err != nil && !errors.Is(event.Err, sql.ErrNoRows) && !errors.Is(event.Err, sql.ErrTxDone) {
 		attrs = append(attrs, attribute.String("error.type", "database_error"))
-		span.SetAttributes(attribute.String("error.type", "database_error"))
-		span.SetStatus(codes.Error, "")
 	}
 	if h.duration != nil {
 		h.duration.Record(ctx, time.Since(event.StartTime).Seconds(), metric.WithAttributes(attrs...))
 	}
-	span.End()
 }
 
-func (h *queryHook) spanAttributes(event *upbun.QueryEvent, operation string) []attribute.KeyValue {
+func (h *metricsHook) spanAttributes(event *upbun.QueryEvent, operation string) []attribute.KeyValue {
 	attrs := make([]attribute.KeyValue, 0, len(h.attributes)+3)
 	attrs = append(attrs, h.attributes...)
 	attrs = append(attrs, attribute.String("db.operation.name", safeOperation(operation)))
@@ -159,4 +199,52 @@ func isNil(value any) bool {
 		return v.IsNil()
 	}
 	return false
+}
+
+func WithTracing(enabled bool) Option { return func(c *config) { c.policy.TracingDisabled = !enabled } }
+func WithMetrics(enabled bool) Option { return func(c *config) { c.policy.MetricsDisabled = !enabled } }
+func WithStatementCapture(enabled bool) Option {
+	return func(c *config) { c.policy.StatementCapture = enabled }
+}
+func WithStatementSanitizer(f func(string) string) Option {
+	return func(c *config) { c.policy.StatementSanitizer = f }
+}
+func WithRawStatement(enabled bool) Option {
+	return func(c *config) { c.policy.RawStatement = enabled; c.policy.StatementCapture = enabled }
+}
+func WithCallerEnabled(enabled bool) Option { return func(c *config) { c.caller = enabled } }
+func WithTraceAttributes(attrs ...attribute.KeyValue) Option {
+	return func(c *config) { telemetry.WithTraceAttributes(attrs...)(&c.policy) }
+}
+func WithMetricAttributes(attrs ...attribute.KeyValue) Option {
+	return func(c *config) { telemetry.WithMetricAttributes(attrs...)(&c.policy) }
+}
+
+// queryHook delegates query telemetry, but intentionally replaces upstream Init:
+// bunotel 1.2.18 registers pool metrics on the global meter there.
+type queryHook struct{ *bunotel.QueryHook }
+
+func (queryHook) Init(*upbun.DB) {}
+
+// WithCompatibilityMetrics also emits the pre-migration goslogx DB instruments.
+// Default metrics use the native bunotel/otelsql names and units only.
+func WithCompatibilityMetrics(enabled bool) Option {
+	return func(c *config) { c.legacyMetrics = enabled }
+}
+func upstreamPool(db *upbun.DB, mp metric.MeterProvider, attrs []attribute.KeyValue) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("bun: upstream pool metric registration failed: %v", r)
+		}
+	}()
+	upotelsql.ReportDBStatsMetrics(db.DB, upotelsql.WithMeterProvider(mp), upotelsql.WithAttributes(attrs...))
+	return nil
+}
+
+var registered sync.Map
+
+// WithSpanNameFormatter maps bunotel's query-event formatter. Return operation
+// labels rather than raw SQL; the formatter controls spans, never metric labels.
+func WithSpanNameFormatter(f func(*upbun.QueryEvent) string) Option {
+	return func(c *config) { c.formatter = f }
 }
