@@ -6,6 +6,7 @@ import (
 	"errors"
 	native "github.com/apache/cassandra-gocql-driver/v2"
 	"github.com/muhammadluth/goslogx"
+	"github.com/muhammadluth/goslogx/internal/integration/privacy"
 	"github.com/muhammadluth/goslogx/internal/integration/telemetry"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -19,8 +20,12 @@ const ScopeName = "github.com/muhammadluth/goslogx/plugins/database/cassandra"
 type Option = telemetry.Option
 
 var WithDBName = telemetry.WithDBName
+var WithRawStatement = telemetry.WithRawStatement
 var WithStatementCapture = telemetry.WithStatementCapture
 var WithStatementSanitizer = telemetry.WithStatementSanitizer
+var WithTraceAttributes = telemetry.WithTraceAttributes
+var WithMetricAttributes = telemetry.WithMetricAttributes
+var WithPropagator = telemetry.WithPropagator
 var WithTracing = telemetry.WithTracing
 var WithMetrics = telemetry.WithMetrics
 
@@ -48,7 +53,7 @@ func InstrumentConfig(cfg *native.ClusterConfig, p goslogx.TelemetryProvider, op
 	cfg.BatchObserver = o
 	return nil
 }
-func (o *Observer) record(ctx context.Context, op, q string, start, end time.Time, err error) {
+func (o *Observer) record(ctx context.Context, op, q string, start, end time.Time, err error, metadata ...attribute.KeyValue) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -62,11 +67,13 @@ func (o *Observer) record(ctx context.Context, op, q string, start, end time.Tim
 	if o.t.Config.Namespace != "" {
 		attrs = append(attrs, attribute.String("db.namespace", o.t.Config.Namespace))
 	}
+	attrs = append(attrs, o.t.Config.TraceAttributes...)
+	attrs = append(attrs, metadata...)
 	ctx, span := o.t.Tracer.Start(ctx, op, trace.WithSpanKind(trace.SpanKindClient), trace.WithTimestamp(start), trace.WithAttributes(attrs...))
 	o.t.Statement(ctx, q)
 	if err != nil {
-		span.SetAttributes(attribute.String("error.type", "database_error"))
-		span.SetStatus(codes.Error, "")
+		privacy.RecordError(span, err)
+		span.SetStatus(codes.Error, privacy.StatusDescription(codes.Error, ""))
 	}
 	span.End(trace.WithTimestamp(end))
 	o.t.RecordDatabase(ctx, op, end.Sub(start), err)
@@ -76,10 +83,22 @@ func (o *Observer) ObserveQuery(ctx context.Context, q native.ObservedQuery) {
 	if f := strings.Fields(q.Statement); len(f) > 0 {
 		op = telemetry.DBOperation(f[0])
 	}
-	o.record(ctx, op, q.Statement, q.Start, q.End, q.Err)
+	attrs := hostAttributes(q.Host)
+	if q.Err == nil && q.Rows >= 0 {
+		attrs = append(attrs, attribute.Int("db.response.returned_rows", q.Rows))
+	}
+	o.record(ctx, op, q.Statement, q.Start, q.End, q.Err, attrs...)
 }
 func (o *Observer) ObserveBatch(ctx context.Context, b native.ObservedBatch) {
-	o.record(ctx, "BATCH", "", b.Start, b.End, b.Err)
+	attrs := append(hostAttributes(b.Host), attribute.Int("db.operation.batch.size", len(b.Statements)))
+	o.record(ctx, "BATCH", "", b.Start, b.End, b.Err, attrs...)
+}
+
+func hostAttributes(host *native.HostInfo) []attribute.KeyValue {
+	if host == nil {
+		return nil
+	}
+	return []attribute.KeyValue{attribute.String("server.address", host.ConnectAddress().String()), attribute.Int("server.port", host.Port())}
 }
 
 // Iter deliberately exposes the native iterator. Always Close it inside fn so

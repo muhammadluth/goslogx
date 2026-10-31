@@ -10,6 +10,7 @@ import (
 
 	"github.com/XSAM/otelsql"
 	"github.com/muhammadluth/goslogx"
+	"github.com/muhammadluth/goslogx/internal/integration/privacy"
 	"github.com/muhammadluth/goslogx/internal/integration/telemetry"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -17,25 +18,13 @@ import (
 
 const ScopeName = "github.com/muhammadluth/goslogx/plugins/database/sql"
 
-type Option = telemetry.Option
-
-var WithDBName = telemetry.WithDBName
-var WithStatementCapture = telemetry.WithStatementCapture
-var WithStatementSanitizer = telemetry.WithStatementSanitizer
-var WithTracing = telemetry.WithTracing
-var WithMetrics = telemetry.WithMetrics
-
-func options(p goslogx.TelemetryProvider, system string, opts []Option) ([]otelsql.Option, telemetry.Config, error) {
-	cfg := telemetry.Config{}
-	for _, opt := range opts {
-		if opt != nil {
-			opt(&cfg)
-		}
-	}
-	if cfg.StatementCapture && cfg.StatementSanitizer == nil {
+func options(p goslogx.TelemetryProvider, system string, opts []Option) ([]otelsql.Option, config, error) {
+	cfg := defaultConfig()
+	telemetry.ApplyOptions(&cfg.Config, &cfg, opts...)
+	if cfg.StatementCapture && cfg.StatementSanitizer == nil && !cfg.RawStatement {
 		return nil, cfg, errors.New("sql instrumentation: statement capture requires a sanitizer")
 	}
-	tp, mp, prop := telemetry.Resolve(p, cfg)
+	tp, mp, prop := telemetry.Resolve(p, cfg.Config)
 	attrs := []attribute.KeyValue{attribute.String("db.system.name", system)}
 	if cfg.Namespace != "" {
 		attrs = append(attrs, attribute.String("db.namespace", cfg.Namespace))
@@ -44,19 +33,24 @@ func options(p goslogx.TelemetryProvider, system string, opts []Option) ([]otels
 		if err == nil || errors.Is(err, driver.ErrSkip) || errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
-		return []attribute.KeyValue{attribute.String("error.type", "database_error")}
+		return []attribute.KeyValue{attribute.String("error.type", privacy.ErrorType(err))}
 	}
 	upstream := []otelsql.Option{
-		otelsql.WithTracerProvider(telemetry.SafeDBProvider(tp, ScopeName, cfg.StatementCapture)), otelsql.WithMeterProvider(scopedMeterProvider{mp}), otelsql.WithTextMapPropagator(prop), otelsql.WithAttributes(attrs...),
-		otelsql.WithSQLCommenter(false), otelsql.WithSpanOptions(otelsql.SpanOptions{DisableQuery: true, DisableErrSkip: true, OmitConnResetSession: true, OmitRows: true, Ping: true}),
-		otelsql.WithSpanNameFormatter(func(_ context.Context, method otelsql.Method, _ string) string { return string(method) }),
+		otelsql.WithTracerProvider(telemetry.ConfiguredDBProvider(tp, ScopeName, cfg.Config)), otelsql.WithMeterProvider(scopedMeterProvider{mp}), otelsql.WithTextMapPropagator(prop), otelsql.WithAttributes(append(attrs, cfg.MetricAttributes...)...),
+		otelsql.WithSQLCommenter(cfg.commenter), otelsql.WithSpanOptions(cfg.spanOptions()),
+		otelsql.WithSpanNameFormatter(func(ctx context.Context, method otelsql.Method, query string) string {
+			if cfg.formatter != nil {
+				return cfg.formatter(ctx, string(method), query)
+			}
+			return string(method)
+		}),
 		otelsql.WithInstrumentErrorAttributesGetter(safeError),
 		otelsql.WithSpanErrorAttributesGetter(safeError),
 		otelsql.WithAttributesGetter(func(_ context.Context, _ otelsql.Method, query string, _ []driver.NamedValue) []attribute.KeyValue {
-			if !cfg.StatementCapture {
+			if !cfg.StatementCapture || query == "" {
 				return nil
 			}
-			text := cfg.StatementSanitizer(query)
+			text := query
 			if len(text) > 4096 {
 				text = text[:4096]
 			}

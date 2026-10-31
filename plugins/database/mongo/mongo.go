@@ -17,12 +17,6 @@ import (
 
 const ScopeName = "github.com/muhammadluth/goslogx/plugins/database/mongo"
 
-type Option = telemetry.Option
-
-var WithDBName = telemetry.WithDBName
-var WithTracing = telemetry.WithTracing
-var WithMetrics = telemetry.WithMetrics
-
 type Monitors struct {
 	Command *event.CommandMonitor
 	Pool    *event.PoolMonitor
@@ -45,48 +39,53 @@ func Instrument(config *options.ClientOptions, p goslogx.TelemetryProvider, opts
 	return nil
 }
 func NewMonitors(p goslogx.TelemetryProvider, opts ...Option) (*Monitors, error) {
-	cfg := telemetry.Config{}
-	for _, opt := range opts {
-		if opt != nil {
-			opt(&cfg)
-		}
-	}
-	tp, mp, _ := telemetry.Resolve(p, cfg)
+	cfg := config{}
+	telemetry.ApplyOptions(&cfg.Config, &cfg, opts...)
+	tp, mp, _ := telemetry.Resolve(p, cfg.Config)
 	meter := mp.Meter(ScopeName)
-	duration, err := meter.Float64Histogram("db.client.operation.duration", metric.WithUnit("s"), metric.WithExplicitBucketBoundaries(.001, .005, .01, .05, .1, .5, 1, 5, 10))
-	if err != nil {
-		return nil, err
+	if cfg.StatementCapture && cfg.StatementSanitizer == nil && !cfg.RawStatement {
+		return nil, errors.New("mongo: command capture requires a sanitizer")
 	}
-	native := otelmongo.NewMonitor(otelmongo.WithCommandAttributeDisabled(true), otelmongo.WithTracerProvider(telemetry.SafeDBProvider(tp, ScopeName)), otelmongo.WithMeterProvider(mongoMeterProvider{MeterProvider: mp, histogram: privateHistogram{Float64Histogram: duration}}), otelmongo.WithSpanNameFormatter(func(e *event.CommandStartedEvent) string { return telemetry.DBOperation(e.CommandName) }))
-	// Do not forward command documents, filters, reply documents or raw failure payloads.
-	command := &event.CommandMonitor{
-		Started: func(ctx context.Context, e *event.CommandStartedEvent) {
-			copy := *e
-			copy.Command = nil
-			copy.DatabaseName = cfg.Namespace
-			copy.CommandName = telemetry.DBOperation(e.CommandName)
-			native.Started(ctx, &copy)
-		},
-		Succeeded: func(ctx context.Context, e *event.CommandSucceededEvent) {
-			copy := *e
-			copy.Reply = nil
-			copy.DatabaseName = cfg.Namespace
-			copy.CommandName = telemetry.DBOperation(e.CommandName)
-			native.Succeeded(ctx, &copy)
-		},
-		Failed: func(ctx context.Context, e *event.CommandFailedEvent) {
-			copy := *e
-			copy.DatabaseName = cfg.Namespace
-			copy.CommandName = telemetry.DBOperation(e.CommandName)
-			copy.Failure = errors.New("database_error")
-			native.Failed(ctx, &copy)
-		},
+	var initErr error
+	optsNative := []otelmongo.Option{
+		otelmongo.WithCommandAttributeDisabled(!cfg.StatementCapture),
+		otelmongo.WithTracerProvider(telemetry.ConfiguredDBProvider(tp, ScopeName, cfg.Config)),
+		otelmongo.WithMeterProvider(mongoMeterProvider{MeterProvider: mp, config: cfg.Config, initErr: &initErr}),
+	}
+	if cfg.formatter != nil {
+		optsNative = append(optsNative, otelmongo.WithSpanNameFormatter(cfg.formatter))
+	}
+	native := otelmongo.NewMonitor(optsNative...)
+	if initErr != nil {
+		return nil, initErr
+	}
+	// The native monitor reads command metadata and handles request matching.
+	// Raw BSON capture remains disabled unless explicitly configured above.
+	command := native
+	if cfg.Namespace != "" {
+		command = &event.CommandMonitor{
+			Started: func(ctx context.Context, e *event.CommandStartedEvent) {
+				copy := *e
+				copy.DatabaseName = cfg.Namespace
+				native.Started(ctx, &copy)
+			},
+			Succeeded: func(ctx context.Context, e *event.CommandSucceededEvent) {
+				copy := *e
+				copy.DatabaseName = cfg.Namespace
+				native.Succeeded(ctx, &copy)
+			},
+			Failed: func(ctx context.Context, e *event.CommandFailedEvent) {
+				copy := *e
+				copy.DatabaseName = cfg.Namespace
+				native.Failed(ctx, &copy)
+			},
+		}
 	}
 	connections, err := meter.Int64UpDownCounter("db.client.connection.count", metric.WithUnit("{connection}"))
 	if err != nil {
 		return nil, err
 	}
-	attrs := []attribute.KeyValue{attribute.String("db.system.name", "mongodb")}
+	attrs := append([]attribute.KeyValue{attribute.String("db.system.name", "mongodb")}, cfg.MetricAttributes...)
 	if cfg.Namespace != "" {
 		attrs = append(attrs, attribute.String("db.namespace", cfg.Namespace))
 	}
@@ -139,36 +138,41 @@ func NewMonitors(p goslogx.TelemetryProvider, opts ...Option) (*Monitors, error)
 
 type mongoMeterProvider struct {
 	metric.MeterProvider
-	histogram metric.Float64Histogram
+	config  telemetry.Config
+	initErr *error
 }
 
 func (p mongoMeterProvider) Meter(_ string, opts ...metric.MeterOption) metric.Meter {
-	return mongoMeter{Meter: p.MeterProvider.Meter(ScopeName, opts...), histogram: p.histogram}
+	return mongoMeter{Meter: p.MeterProvider.Meter(ScopeName, opts...), config: p.config, initErr: p.initErr}
 }
 
 type mongoMeter struct {
 	metric.Meter
-	histogram metric.Float64Histogram
+	config  telemetry.Config
+	initErr *error
 }
 
-func (m mongoMeter) Float64Histogram(string, ...metric.Float64HistogramOption) (metric.Float64Histogram, error) {
-	return m.histogram, nil
+func (m mongoMeter) Float64Histogram(name string, opts ...metric.Float64HistogramOption) (metric.Float64Histogram, error) {
+	h, err := m.Meter.Float64Histogram(name, opts...)
+	if err != nil {
+		*m.initErr = errors.Join(*m.initErr, err)
+		return h, err
+	}
+	return privateHistogram{Float64Histogram: h, config: m.config}, nil
 }
 
-type privateHistogram struct{ metric.Float64Histogram }
+type privateHistogram struct {
+	metric.Float64Histogram
+	config telemetry.Config
+}
 
 func (h privateHistogram) Record(ctx context.Context, value float64, opts ...metric.RecordOption) {
-	cfg := metric.NewRecordConfig(opts)
-	set := cfg.Attributes()
-	attrs := make([]attribute.KeyValue, 0, 4)
+	set := metric.NewRecordConfig(opts).Attributes()
+	attrs := append([]attribute.KeyValue(nil), h.config.MetricAttributes...)
 	for _, a := range set.ToSlice() {
 		switch a.Key {
-		case "db.system.name", "db.namespace":
+		case "db.system.name", "db.namespace", "db.operation.name", "network.peer.address", "network.peer.port", "network.transport", "error.type", "db.response.status_code":
 			attrs = append(attrs, a)
-		case "db.operation.name":
-			attrs = append(attrs, attribute.String("db.operation.name", telemetry.DBOperation(a.Value.AsString())))
-		case "error.type":
-			attrs = append(attrs, attribute.String("error.type", "database_error"))
 		}
 	}
 	h.Float64Histogram.Record(ctx, value, metric.WithAttributes(attrs...))

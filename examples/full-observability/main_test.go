@@ -148,7 +148,7 @@ func TestMessagingDistributedTopology(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	var pub, receive, process, workerDB, inbound, appSpan, outbound, remote, cacheSpan sdktrace.ReadOnlySpan
+	var pub, process, workerDB, inbound, appSpan, outbound, remote, cacheSpan sdktrace.ReadOnlySpan
 	for _, s := range recorder.Ended() {
 		if s.SpanContext().TraceID().String() != "0123456789abcdef0123456789abcdef" {
 			t.Fatalf("trace continuity: %s", s.Name())
@@ -170,17 +170,17 @@ func TestMessagingDistributedTopology(t *testing.T) {
 		case s.SpanKind() == trace.SpanKindProducer:
 			pub = s
 		case s.SpanKind() == trace.SpanKindConsumer && strings.HasSuffix(s.Name(), " receive"):
-			receive = s
+			t.Fatal("unexpected synthetic receive span")
 		case s.SpanKind() == trace.SpanKindConsumer && strings.HasSuffix(s.Name(), " process"):
 			process = s
 		case s.Name() == "UPDATE":
 			workerDB = s
 		}
 	}
-	if pub == nil || receive == nil || process == nil || workerDB == nil {
+	if pub == nil || process == nil || workerDB == nil {
 		t.Fatalf("missing topology spans: %v", recorder.Ended())
 	}
-	if receive.Parent().SpanID() != pub.SpanContext().SpanID() || !receive.Parent().IsRemote() || process.Parent().SpanID() != receive.SpanContext().SpanID() || workerDB.Parent().SpanID() != process.SpanContext().SpanID() {
+	if process.Parent().SpanID() != pub.SpanContext().SpanID() || !process.Parent().IsRemote() || workerDB.Parent().SpanID() != process.SpanContext().SpanID() {
 		t.Fatal("messaging parent chain")
 	}
 	if inbound == nil || appSpan == nil || outbound == nil || remote == nil || cacheSpan == nil {
@@ -216,7 +216,7 @@ func TestMessagingDistributedTopology(t *testing.T) {
 			names[m.Name] = true
 		}
 	}
-	for _, name := range []string{"messaging.client.sent.messages", "messaging.client.consumed.messages", "messaging.process.duration", "db.client.operation.duration", "http.client.request.duration"} {
+	for _, name := range []string{"messaging.client.sent.messages", "messaging.client.consumed.messages", "messaging.process.duration", "go.sql.query_timing", "http.client.request.duration"} {
 		if !names[name] {
 			t.Errorf("missing %s", name)
 		}

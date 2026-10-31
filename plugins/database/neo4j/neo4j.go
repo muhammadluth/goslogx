@@ -8,6 +8,7 @@ import (
 	"github.com/muhammadluth/goslogx/internal/integration/telemetry"
 	native "github.com/neo4j/neo4j-go-driver/v6/neo4j"
 	"go.opentelemetry.io/otel/trace"
+	"strings"
 	"sync"
 )
 
@@ -16,8 +17,12 @@ const ScopeName = "github.com/muhammadluth/goslogx/plugins/database/neo4j"
 type Option = telemetry.Option
 
 var WithDBName = telemetry.WithDBName
+var WithRawStatement = telemetry.WithRawStatement
 var WithStatementCapture = telemetry.WithStatementCapture
 var WithStatementSanitizer = telemetry.WithStatementSanitizer
+var WithTraceAttributes = telemetry.WithTraceAttributes
+var WithMetricAttributes = telemetry.WithMetricAttributes
+var WithPropagator = telemetry.WithPropagator
 var WithTracing = telemetry.WithTracing
 var WithMetrics = telemetry.WithMetrics
 
@@ -42,7 +47,14 @@ func WrapSession(s native.Session, p goslogx.TelemetryProvider, opts ...Option) 
 	return &Session{Session: s, t: t, pending: make(map[*result]struct{})}, nil
 }
 func (s *Session) query(ctx context.Context, q string, fn func(context.Context) (native.Result, error)) (native.Result, error) {
-	ctx, end := s.t.Begin(ctx, "RUN", "", trace.SpanKindClient)
+	operation := "RUN"
+	if fields := strings.Fields(q); len(fields) > 0 {
+		switch strings.ToUpper(fields[0]) {
+		case "MATCH", "OPTIONAL", "CREATE", "MERGE", "RETURN", "CALL", "UNWIND", "WITH", "LOAD", "PROFILE", "EXPLAIN", "SET", "DELETE", "DETACH", "REMOVE", "SHOW":
+			operation = strings.ToUpper(fields[0])
+		}
+	}
+	ctx, end := s.t.Begin(ctx, operation, "", trace.SpanKindClient)
 	s.t.Statement(ctx, q)
 	r, err := fn(ctx)
 	if err != nil {
@@ -83,7 +95,14 @@ func (s *Session) BeginTransaction(ctx context.Context, opts ...func(*native.Tra
 }
 func (s *Session) managed(ctx context.Context, write bool, work native.ManagedTransactionWork, opts ...func(*native.TransactionConfig)) (out any, err error) {
 	err = s.t.Run(ctx, "BEGIN", trace.SpanKindClient, func(ctx context.Context) error {
-		fn := func(tx native.ManagedTransaction) (any, error) {
+		fn := func(tx native.ManagedTransaction) (value any, err error) {
+			defer func() {
+				if failure := recover(); failure != nil {
+					s.finishPending(errors.New("transaction callback panicked"))
+					panic(failure)
+				}
+				s.finishPending(err)
+			}()
 			return work(&managed{ManagedTransaction: tx, s: s, ctx: ctx})
 		}
 		var e error
@@ -181,13 +200,17 @@ func (r *result) Consume(ctx context.Context) (native.ResultSummary, error) {
 }
 func (r *result) Records(ctx context.Context) func(func(*native.Record, error) bool) {
 	return func(yield func(*native.Record, error) bool) {
+		stopped := false
 		r.Result.Records(ctx)(func(v *native.Record, err error) bool {
 			if err != nil {
 				r.end(err)
 			}
-			return yield(v, err)
+			stopped = !yield(v, err)
+			return !stopped
 		})
-		r.end(r.Result.Err())
+		if !stopped {
+			r.end(r.Result.Err())
+		}
 	}
 }
 

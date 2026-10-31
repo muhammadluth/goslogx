@@ -10,6 +10,8 @@ go get github.com/muhammadluth/goslogx/plugins/cache/redis
 
 This plugin wraps `github.com/redis/go-redis/extra/redisotel/v9` v9.23.0. `redisotel` owns command, pipeline, dial-span, error, and pool-metric semantics. goslogx supplies providers, a stable scope, lifecycle options, and privacy policy.
 
+## QUICK START
+
 ```go
 closeMetrics := make(chan struct{})
 if err := goslogxredis.Instrument(client, logger,
@@ -20,13 +22,13 @@ if err := goslogxredis.Instrument(client, logger,
 defer close(closeMetrics)
 ```
 
-The hook supports Client, ClusterClient, Ring, and UniversalClient values holding those concrete clients. Register it once before concurrent use. Existing and future Ring shards are instrumented; `WithErrorHandler` receives asynchronous initialization errors from future nodes.
+The hook supports Client, ClusterClient, Ring, and UniversalClient values holding those concrete clients. Register it once before concurrent use. Repeated calls on the same client reuse the first registration result and configuration. Existing and future Ring shards are instrumented; `WithErrorHandler` receives asynchronous initialization errors from future nodes.
 
 ## DEFAULT BEHAVIOR
 
-Tracing and metrics are enabled. Known command spans use bounded operation names such as `redis.get` and include `db.operation.name`; unknown/custom commands fall back to `redis.command`, while pipeline and dial spans remain fixed. Keys, values, arguments, server addresses, caller information, statements, and raw error descriptions are omitted. `AUTH` and `HELLO AUTH` use the upstream default filter. `redis.Nil` is not marked as an error. Metrics use `pool.name=redis` and semantic-convention-compliant cumulative counters.
+Tracing and metrics are enabled. Native command spans retain names such as `get`, `set`, `mget`, and module commands. Pipeline spans retain the native `redis.pipeline ...` summary; dial spans use `redis.dial`. Safe server addresses and ports remain available. Connection-string attributes retain only the endpoint. Keys, values, arguments, caller information, statements, and raw error descriptions are omitted by default. `AUTH` and `HELLO AUTH` use the upstream default filter. `redis.Nil` is not marked as an error. Metrics use `pool.name=redis` and semantic-convention-compliant cumulative counters.
 
-`WithCommandSpanNames(false)` restores the legacy fixed `redis.command` name. Operation mode never includes command arguments, keys, or values.
+`WithCommandSpanNames(false)` restores the legacy fixed `redis.command` name. This compatibility option is deprecated. Normal native command names do not contain arguments.
 
 ## SUPPORTED OPTIONS
 
@@ -38,7 +40,7 @@ Tracing and metrics are enabled. Known command spans use bounded operation names
 | `WithAttributes` | Safe wrapper | none | Static attributes; sensitive-looking keys are rejected. Keep values bounded because they also reach metrics. |
 | `WithPoolName` | Safe wrapper | `redis` | Blank values fall back to `redis`. Keep the value bounded. |
 | `WithDBStatement` | Disabled by default | `false` | Raw command capture can expose keys and values. |
-| `WithCommandSpanNames` | Safe wrapper | `true` | Adds only the bounded operation name; set `false` for legacy `redis.command`. |
+| `WithCommandSpanNames` | Safe wrapper | `true` | Preserves native names; deprecated `false` selects legacy `redis.command`. |
 | `WithCallerEnabled` | Disabled by default | `false` | Adds runtime stack discovery and source attributes. |
 | `WithCommandFilter` | Safe wrapper | upstream default | Returning `true` skips the command span. The AUTH safety filter always remains active. |
 | `WithCommandsFilter` | Safe wrapper | upstream default | Returning `true` skips the pipeline span. Pipelines containing authentication commands always remain filtered. |
@@ -77,7 +79,7 @@ Caller capture performs runtime stack discovery for every observed command or pi
 
 ## UPSTREAM CAPABILITY DIFFERENCES
 
-All public redisotel v9.23.0 configuration capabilities are represented. Provider overrides are not applicable because goslogx owns provider selection. goslogx additionally normalizes span names and removes raw error details while preserving error status.
+All public redisotel v9.23.0 configuration capabilities are represented. Provider overrides are not applicable because goslogx owns provider selection. goslogx preserves native names, events, safe link attributes and error classification while redacting raw error details.
 
 ## AUTO-INSTRUMENTATION COEXISTENCE
 

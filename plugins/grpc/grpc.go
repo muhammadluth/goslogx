@@ -79,7 +79,8 @@ func WithSpanKind(kind trace.SpanKind) Option {
 }
 
 // WithMethodNames opts known, registered full methods into spans and dimensions.
-// Without this option names are gRPC and raw service/method metadata is omitted.
+// Span names and RPC attributes always preserve native otelgrpc semantics.
+// This allowlist controls service/method metric dimensions only.
 func WithMethodNames(names ...string) Option {
 	copy := append([]string(nil), names...)
 	return func(c *config) {

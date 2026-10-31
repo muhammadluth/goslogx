@@ -49,3 +49,5 @@ go.work.sum
 .DS_Store
 ._*
 Thumbs.db
+
+maintenance/

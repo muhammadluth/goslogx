@@ -30,6 +30,16 @@ var WithPublicEndpointFn = httptelemetry.WithPublicEndpointFn
 var WithSpanNameFormatter = httptelemetry.WithSpanNameFormatter
 var WithMetricAttributesFn = httptelemetry.WithMetricAttributesFn
 
+// Fallback instruments a router's NotFoundHandler or MethodNotAllowedHandler.
+// Use alongside router.Use(Middleware(...)); do not wrap the entire router.
+// Mux does not run its middleware for these fallback handlers.
+func Fallback(provider goslogx.TelemetryProvider, next http.Handler, opts ...Option) http.Handler {
+	if next == nil {
+		next = http.NotFoundHandler()
+	}
+	return Middleware(provider, opts...)(next)
+}
+
 func Middleware(provider goslogx.TelemetryProvider, opts ...Option) mux.MiddlewareFunc {
 	c := httptelemetry.NewConfig(opts...)
 	p := httptelemetry.Resolve(provider, ScopeName, c)
