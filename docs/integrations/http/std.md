@@ -10,6 +10,8 @@ go get github.com/muhammadluth/goslogx/plugins/http/std
 
 Import `github.com/muhammadluth/goslogx/plugins/http/std` as `goslogxhttp`. Wrap an application handler or existing RoundTripper:
 
+## QUICK START
+
 ```go
 handler := goslogxhttp.NewHandler(logger, handler, "GET payments",
     goslogxhttp.WithRoute("/payments/{id}"),
@@ -69,3 +71,22 @@ Install a single HTTP instrumentation layer. Do not wrap a handler or transport 
 The canonical import path is `github.com/muhammadluth/goslogx/plugins/http/std`. Go 1.22+ ServeMux patterns are read after dispatch: `GET /users/{id}` is recorded as that template rather than the concrete path. `InstrumentClient` returns a configured copy of your client while wrapping its existing transport.
 
 See [HTTP integrations](README.md) for router-specific choices, common options and automatic-instrumentation coexistence, and [HTTP examples](../../../examples/http/README.md) for downstream tests.
+
+## TRACING AND METRICS
+
+Server instrumentation records SERVER spans with method, registered route and response status.
+Incoming context uses the configured propagator. Request-duration histograms use seconds; route
+labels use templates. Safe upstream events, links and error types are retained. Raw exception and
+panic messages are redacted while the original failure remains available to the application.
+
+For signal modes, bounded attributes and provider ownership, see the
+[HTTP integration contract](README.md#options-and-context). Native middleware determines which
+body-size or active-request instruments are available; go-restful and fasthttp supply the shared
+duration and active-request instruments described in their guides.
+
+## LIFECYCLE AND TROUBLESHOOTING
+
+Install instrumentation before accepting requests. Pass the handler's active context downstream,
+finish requests, then flush and shut down application-owned providers. Use one instrumentation
+layer per request. If route labels are absent, check registration order and the framework's
+unmatched-route behavior. Callback filters suppress telemetry without suppressing the handler.

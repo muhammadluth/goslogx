@@ -87,9 +87,6 @@ func Middleware(provider goslogx.TelemetryProvider, opts ...Option) echo.Middlew
 	c := httptelemetry.NewConfig(local.common...)
 	p := httptelemetry.Resolve(provider, ScopeName, c)
 	upstream := []otelecho.Option{otelecho.WithTracerProvider(p.TP), otelecho.WithMeterProvider(p.MP), otelecho.WithPropagators(p.Prop)}
-	if local.skipper != nil {
-		upstream = append(upstream, otelecho.WithSkipper(local.skipper))
-	}
 	if local.metricAttributesFn != nil {
 		upstream = append(upstream, otelecho.WithMetricAttributeFn(local.metricAttributesFn))
 	}
@@ -103,6 +100,9 @@ func Middleware(provider goslogx.TelemetryProvider, opts ...Option) echo.Middlew
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		observed := native(next)
 		return func(ctx echo.Context) error {
+			if local.skipper != nil && local.skipper(ctx) {
+				return next(ctx)
+			}
 			if c.Filter != nil && !c.Filter(ctx.Request()) {
 				return next(ctx)
 			}

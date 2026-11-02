@@ -15,14 +15,6 @@ import (
 
 const ScopeName = "github.com/muhammadluth/goslogx/plugins/messaging/kafka/franzgo"
 
-type Option = telemetry.Option
-
-var WithDestinationNormalizer = telemetry.WithDestinationNormalizer
-var WithConsumerGroup = telemetry.WithConsumerGroup
-var WithClientID = telemetry.WithClientID
-var WithTracing = telemetry.WithTracing
-var WithMetrics = telemetry.WithMetrics
-
 type HeaderCarrier struct{ Headers *[]kgo.RecordHeader }
 
 func (h HeaderCarrier) Get(key string) string {
@@ -59,7 +51,11 @@ type Poller interface {
 type Instrumentation struct{ t *telemetry.Instrumentation }
 
 func New(p goslogx.TelemetryProvider, opts ...Option) (*Instrumentation, error) {
-	t, err := telemetry.New(p, ScopeName, "kafka", true, opts...)
+	cfg := configure(opts)
+	if cfg.keyFormatter != nil || cfg.mergedConnects {
+		return nil, errors.New("franzgo: native hook options require NewNative")
+	}
+	t, err := telemetry.New(p, ScopeName, "kafka", true, func(c *telemetry.Config) { *c = cfg.Config })
 	if err != nil {
 		return nil, err
 	}
@@ -110,6 +106,9 @@ func (i *Instrumentation) ProduceSync(ctx context.Context, producer Producer, re
 	return results
 }
 func (i *Instrumentation) PollRecords(ctx context.Context, client Poller, maxRecords int) kgo.Fetches {
+	if telemetry.Nil(client) {
+		return kgo.Fetches{{Topics: []kgo.FetchTopic{{Partitions: []kgo.FetchPartition{{Err: errors.New("franzgo instrumentation: nil poller")}}}}}}
+	}
 	// The native client controls fetch/group/commit/rebalance semantics.
 	_, finish := i.t.BeginCount(ctx, "receive", "", trace.SpanKindConsumer, 0)
 	result := client.PollRecords(ctx, maxRecords)

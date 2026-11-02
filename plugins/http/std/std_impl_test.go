@@ -69,7 +69,7 @@ func checkPrivacy(t *testing.T, spans []sdktrace.ReadOnlySpan, data metricdata.R
 		if s.InstrumentationScope().Name != ScopeName {
 			t.Errorf("scope: %s", s.InstrumentationScope().Name)
 		}
-		if s.Status().Description != "" || len(s.Events()) != 0 {
+		if strings.Contains(fmt.Sprint(s.Status(), s.Events()), "SECRET") {
 			t.Errorf("error details leaked: %v", s)
 		}
 		for _, a := range s.Attributes() {

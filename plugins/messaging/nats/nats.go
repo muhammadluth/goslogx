@@ -21,6 +21,9 @@ type Option = telemetry.Option
 
 var WithDestinationNormalizer = telemetry.WithDestinationNormalizer
 var WithConsumerName = telemetry.WithConsumerName
+var WithTraceAttributes = telemetry.WithTraceAttributes
+var WithMetricAttributes = telemetry.WithMetricAttributes
+var WithPropagator = telemetry.WithPropagator
 var WithTracing = telemetry.WithTracing
 var WithMetrics = telemetry.WithMetrics
 var WithErrorHandler = telemetry.WithErrorHandler
@@ -91,7 +94,9 @@ func (c *Client) PublishMsg(ctx context.Context, msg *gonats.Msg) (err error) {
 		return err
 	}
 	copy := clone(msg)
-	c.t.Inject(ctx, HeaderCarrier(copy.Header))
+	if c.Conn.HeadersSupported() {
+		c.t.Inject(ctx, HeaderCarrier(copy.Header))
+	}
 	return c.Conn.PublishMsg(copy)
 }
 func (c *Client) Request(ctx context.Context, subject string, data []byte) (*gonats.Msg, error) {
@@ -104,7 +109,9 @@ func (c *Client) RequestMsg(ctx context.Context, msg *gonats.Msg) (response *gon
 	ctx, finish := c.t.Begin(ctx, "request", msg.Subject, trace.SpanKindProducer)
 	defer func() { finish(err) }()
 	copy := clone(msg)
-	c.t.Inject(ctx, HeaderCarrier(copy.Header))
+	if c.Conn.HeadersSupported() {
+		c.t.Inject(ctx, HeaderCarrier(copy.Header))
+	}
 	return c.Conn.RequestMsgWithContext(ctx, copy)
 }
 
@@ -183,7 +190,7 @@ func (j *JetStream) Process(ctx context.Context, msg jetstream.Msg, handler func
 		ctx = context.Background()
 	}
 	if metadata, err := msg.Metadata(); err == nil && metadata.NumDelivered > 1 {
-		j.redeliveries.Add(ctx, 1, metric.WithAttributes(attribute.String("messaging.system", "nats")))
+		j.redeliveries.Add(ctx, 1, metric.WithAttributes(append([]attribute.KeyValue{attribute.String("messaging.system", "nats")}, j.t.Config.MetricAttributes...)...))
 	}
 	return j.t.Process(ctx, HeaderCarrier(msg.Headers()), msg.Subject(), func(ctx context.Context) error { return handler(ctx, msg) })
 }
@@ -194,18 +201,44 @@ func (j *JetStream) Consume(ctx context.Context, consumer jetstream.Consumer, ha
 	return consumer.Consume(func(msg jetstream.Msg) { j.t.Report(j.Process(ctx, msg, handler)) }, opts...)
 }
 
-// Fetch preserves native batch/timeout behavior. Call Process for each returned message.
+// Fetch measures native batch completion, including asynchronous delivery and
+// errors. Call Process for each returned message to measure application work.
 func (j *JetStream) Fetch(ctx context.Context, consumer jetstream.Consumer, batch int, opts ...jetstream.FetchOpt) (messages jetstream.MessageBatch, err error) {
 	if telemetry.Nil(consumer) {
 		return nil, errors.New("nats instrumentation: nil consumer")
 	}
 	_, finish := j.t.BeginCount(ctx, "fetch", "", trace.SpanKindConsumer, 0)
-	defer func() { finish(err) }()
 	if ctx != nil && ctx.Err() != nil {
+		finish(ctx.Err())
 		return nil, ctx.Err()
 	}
-	return consumer.Fetch(batch, opts...)
+	messages, err = consumer.Fetch(batch, opts...)
+	if err != nil {
+		finish(err)
+		return messages, err
+	}
+	nativeBatch := messages
+	in := nativeBatch.Messages()
+	out := make(chan jetstream.Msg, cap(in))
+	observed := &observedBatch{MessageBatch: messages, messages: out}
+	go func() {
+		for msg := range in {
+			out <- msg
+		}
+		finish(nativeBatch.Error())
+		close(out)
+	}()
+	return observed, nil
 }
+
+// observedBatch retains native error access and a stable receive channel. Its
+// buffer matches the native batch, so delivery does not require caller draining.
+type observedBatch struct {
+	jetstream.MessageBatch
+	messages <-chan jetstream.Msg
+}
+
+func (b *observedBatch) Messages() <-chan jetstream.Msg { return b.messages }
 
 // ObserveConsumer records a caller-refreshed snapshot without broker API calls or polling goroutines.
 // Lag means outstanding work: pending delivery plus pending acknowledgement.
@@ -216,7 +249,7 @@ func (j *JetStream) ObserveConsumer(ctx context.Context, info *jetstream.Consume
 	if info == nil {
 		return
 	}
-	attrs := []attribute.KeyValue{attribute.String("messaging.system", "nats")}
+	attrs := append([]attribute.KeyValue{attribute.String("messaging.system", "nats")}, j.t.Config.MetricAttributes...)
 	if j.t.Config.Consumer != "" {
 		attrs = append(attrs, attribute.String("messaging.consumer.name", j.t.Config.Consumer))
 	}

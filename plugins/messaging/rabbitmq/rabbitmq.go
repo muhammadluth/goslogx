@@ -25,6 +25,9 @@ func WithRoutingKeyNormalizer(f func(string) string) Option {
 	return func(c *telemetry.Config) { c.RoutingNormalizer = f }
 }
 
+var WithTraceAttributes = telemetry.WithTraceAttributes
+var WithMetricAttributes = telemetry.WithMetricAttributes
+var WithPropagator = telemetry.WithPropagator
 var WithTracing = telemetry.WithTracing
 var WithMetrics = telemetry.WithMetrics
 
@@ -122,7 +125,7 @@ func (c *Client) Process(ctx context.Context, queue string, delivery amqp.Delive
 		ctx = context.Background()
 	}
 	if delivery.Redelivered {
-		c.redeliveries.Add(ctx, 1, metric.WithAttributes(attribute.String("messaging.system", "rabbitmq")))
+		c.redeliveries.Add(ctx, 1, metric.WithAttributes(append([]attribute.KeyValue{attribute.String("messaging.system", "rabbitmq")}, c.t.Config.MetricAttributes...)...))
 	}
 	return c.t.Process(ctx, HeaderCarrier(delivery.Headers), queue, func(ctx context.Context) error {
 		if !telemetry.Nil(delivery.Acknowledger) {
@@ -144,7 +147,7 @@ func (a acknowledger) settle(op string, fn func() error) (err error) {
 	defer func() { finish(err) }()
 	err = fn()
 	if err == nil {
-		a.client.settlements.Add(ctx, 1, metric.WithAttributes(attribute.String("messaging.system", "rabbitmq"), attribute.String("messaging.operation.name", op)))
+		a.client.settlements.Add(ctx, 1, metric.WithAttributes(append([]attribute.KeyValue{attribute.String("messaging.system", "rabbitmq"), attribute.String("messaging.operation.name", op)}, a.client.t.Config.MetricAttributes...)...))
 	}
 	return err
 }

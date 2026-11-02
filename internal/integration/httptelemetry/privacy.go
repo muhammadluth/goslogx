@@ -2,6 +2,7 @@ package httptelemetry
 
 import (
 	"context"
+	"github.com/muhammadluth/goslogx/internal/integration/privacy"
 	"strings"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -59,25 +60,25 @@ func safeAttributes(input []attribute.KeyValue) []attribute.KeyValue {
 			if a.Value.Type() != attribute.STRING || a.Value.AsString() == "" {
 				continue
 			}
-			a = attribute.String("error.type", "http_error")
+			a = attribute.String("error.type", privacy.ErrorLabel(a.Value.AsString(), "http_error"))
 			output = append(output, a)
 			continue
-		case "http.request.method":
+		case "http.request.method", "http.method":
 			if a.Value.Type() == attribute.STRING {
 				switch a.Value.AsString() {
 				case "GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH", "_OTHER":
 					output = append(output, a)
 				}
 			}
-		case "http.response.status_code":
+		case "http.response.status_code", "http.status_code":
 			if a.Value.Type() == attribute.INT64 && a.Value.AsInt64() >= 100 && a.Value.AsInt64() <= 599 {
 				output = append(output, a)
 			}
-		case "http.request.body.size", "http.response.body.size":
+		case "http.request.body.size", "http.response.body.size", "http.request_content_length", "http.response_content_length":
 			if a.Value.Type() == attribute.INT64 && a.Value.AsInt64() >= 0 {
 				output = append(output, a)
 			}
-		case "url.scheme":
+		case "url.scheme", "http.scheme":
 			if a.Value.Type() == attribute.STRING && (a.Value.AsString() == "http" || a.Value.AsString() == "https") {
 				output = append(output, a)
 			}
@@ -85,7 +86,7 @@ func safeAttributes(input []attribute.KeyValue) []attribute.KeyValue {
 			if a.Value.Type() == attribute.STRING && a.Value.AsString() == "http" {
 				output = append(output, a)
 			}
-		case "network.protocol.version":
+		case "network.protocol.version", "http.flavor":
 			if a.Value.Type() == attribute.STRING {
 				switch a.Value.AsString() {
 				case "1.0", "1.1", "2", "3":
@@ -102,7 +103,7 @@ func safeMetricAttributes(input []attribute.KeyValue) []attribute.KeyValue {
 	attributes := safeAttributes(input)
 	result := attributes[:0]
 	for _, a := range attributes {
-		if a.Key != "http.request.body.size" && a.Key != "http.response.body.size" {
+		if a.Key != "http.request.body.size" && a.Key != "http.response.body.size" && a.Key != "http.request_content_length" && a.Key != "http.response_content_length" {
 			result = append(result, a)
 		}
 	}
@@ -140,7 +141,7 @@ func (t privateTracer) Start(ctx context.Context, name string, opts ...trace.Spa
 		clean = append(clean, trace.WithNewRoot())
 	}
 	for _, link := range c.Links() {
-		clean = append(clean, trace.WithLinks(trace.Link{SpanContext: link.SpanContext}))
+		clean = append(clean, trace.WithLinks(privacy.Link(link)))
 	}
 	clean = append(clean, t.provider.start...)
 	clean = append(clean, trace.WithAttributes(t.provider.attributes...))
@@ -158,11 +159,17 @@ func (s privateSpan) TracerProvider() trace.TracerProvider { return s.provider }
 func (s privateSpan) SetAttributes(attributes ...attribute.KeyValue) {
 	s.Span.SetAttributes(safeAttributes(attributes)...)
 }
-func (s privateSpan) SetStatus(code codes.Code, _ string)     { s.Span.SetStatus(code, "") }
-func (s privateSpan) RecordError(error, ...trace.EventOption) {}
-func (s privateSpan) AddEvent(string, ...trace.EventOption)   {}
+func (s privateSpan) SetStatus(code codes.Code, description string) {
+	s.Span.SetStatus(code, privacy.StatusDescription(code, description))
+}
+func (s privateSpan) RecordError(err error, opts ...trace.EventOption) {
+	privacy.RecordError(s.Span, err, opts...)
+}
+func (s privateSpan) AddEvent(name string, opts ...trace.EventOption) {
+	privacy.Event(s.Span, name, opts...)
+}
 func (s privateSpan) AddLink(link trace.Link) {
-	s.Span.AddLink(trace.Link{SpanContext: link.SpanContext})
+	s.Span.AddLink(privacy.Link(link))
 }
 
 type privateMeterProvider struct {
@@ -261,3 +268,5 @@ type privateUpDownCounter struct {
 func (c privateUpDownCounter) Add(ctx context.Context, value int64, opts ...metric.AddOption) {
 	c.Int64UpDownCounter.Add(ctx, value, addOptions(opts, c.attributes)...)
 }
+
+func (s privateSpan) End(opts ...trace.SpanEndOption) { privacy.End(s.Span, recover(), opts...) }

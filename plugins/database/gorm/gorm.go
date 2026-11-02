@@ -17,14 +17,6 @@ import (
 
 const ScopeName = "github.com/muhammadluth/goslogx/plugins/database/gorm"
 
-type Option = telemetry.Option
-
-var WithDBName = telemetry.WithDBName
-var WithStatementCapture = telemetry.WithStatementCapture
-var WithStatementSanitizer = telemetry.WithStatementSanitizer
-var WithTracing = telemetry.WithTracing
-var WithMetrics = telemetry.WithMetrics
-
 type timing struct {
 	started time.Time
 	op      string
@@ -58,14 +50,16 @@ func (p *plugin) Initialize(db *native.DB) error {
 	case "sqlserver":
 		system = "microsoft.sql_server"
 	}
-	t, err := telemetry.New(p.provider, ScopeName, system, false, p.opts...)
+	cfg := config{}
+	telemetry.ApplyOptions(&cfg.Config, &cfg, p.opts...)
+	t, err := telemetry.New(p.provider, ScopeName, system, false, func(c *telemetry.Config) { *c = cfg.Config })
 	if err != nil {
 		return err
 	}
 	tp, _, _ := telemetry.Resolve(p.provider, t.Config)
 	formatter := func(query string) string {
 		if t.Config.StatementCapture {
-			text := t.Config.StatementSanitizer(query)
+			text := query
 			if len(text) > 4096 {
 				text = text[:4096]
 			}
@@ -77,7 +71,17 @@ func (p *plugin) Initialize(db *native.DB) error {
 		}
 		return "QUERY"
 	}
-	if err := db.Use(tracing.NewPlugin(tracing.WithTracerProvider(telemetry.SafeDBProvider(tp, ScopeName, t.Config.StatementCapture)), tracing.WithAttributes(attribute.String("db.system.name", system), attribute.String("db.namespace", t.Config.Namespace)), tracing.WithoutMetrics(), tracing.WithoutQueryVariables(), tracing.WithQueryFormatter(formatter))); err != nil {
+	nativeOptions := []tracing.Option{tracing.WithTracerProvider(telemetry.ConfiguredDBProvider(tp, ScopeName, t.Config)), tracing.WithAttributes(attribute.String("db.system.name", system), attribute.String("db.namespace", t.Config.Namespace)), tracing.WithoutMetrics(), tracing.WithQueryFormatter(formatter)}
+	if !cfg.queryVariables {
+		nativeOptions = append(nativeOptions, tracing.WithoutQueryVariables())
+	}
+	if cfg.stackTrace {
+		nativeOptions = append(nativeOptions, tracing.WithRecordStackTrace())
+	}
+	if cfg.serverAddressDisabled {
+		nativeOptions = append(nativeOptions, tracing.WithoutServerAddress())
+	}
+	if err := db.Use(tracing.NewPlugin(nativeOptions...)); err != nil {
 		return err
 	}
 	before := func(op string) func(*native.DB) {
@@ -93,42 +97,26 @@ func (p *plugin) Initialize(db *native.DB) error {
 			t.RecordDatabase(tx.Statement.Context, state.op, time.Since(state.started), err)
 		}
 	}
-	if err := db.Callback().Create().Before("*").Register(ScopeName+":before", before("INSERT")); err != nil {
-		return err
+	registrations := []callbackRegistration{
+		{db.Callback().Create().Before("*").Register, "before", before("INSERT")},
+		{db.Callback().Create().After("*").Register, "after", after},
+		{db.Callback().Query().Before("*").Register, "before", before("SELECT")},
+		{db.Callback().Query().After("*").Register, "after", after},
+		{db.Callback().Update().Before("*").Register, "before", before("UPDATE")},
+		{db.Callback().Update().After("*").Register, "after", after},
+		{db.Callback().Delete().Before("*").Register, "before", before("DELETE")},
+		{db.Callback().Delete().After("*").Register, "after", after},
+		{db.Callback().Raw().Before("*").Register, "before", before("EXEC")},
+		{db.Callback().Raw().After("*").Register, "after", after},
+		{db.Callback().Row().Before("*").Register, "before", before("QUERY")},
+		{db.Callback().Row().After("*").Register, "after", after},
 	}
-	if err := db.Callback().Create().After("*").Register(ScopeName+":after", after); err != nil {
-		return err
+	for _, registration := range registrations {
+		if err := registration.register(ScopeName+":"+registration.phase, registration.hook); err != nil {
+			return err
+		}
 	}
-	if err := db.Callback().Query().Before("*").Register(ScopeName+":before", before("SELECT")); err != nil {
-		return err
-	}
-	if err := db.Callback().Query().After("*").Register(ScopeName+":after", after); err != nil {
-		return err
-	}
-	if err := db.Callback().Update().Before("*").Register(ScopeName+":before", before("UPDATE")); err != nil {
-		return err
-	}
-	if err := db.Callback().Update().After("*").Register(ScopeName+":after", after); err != nil {
-		return err
-	}
-	if err := db.Callback().Delete().Before("*").Register(ScopeName+":before", before("DELETE")); err != nil {
-		return err
-	}
-	if err := db.Callback().Delete().After("*").Register(ScopeName+":after", after); err != nil {
-		return err
-	}
-	if err := db.Callback().Raw().Before("*").Register(ScopeName+":before", before("EXEC")); err != nil {
-		return err
-	}
-	if err := db.Callback().Raw().After("*").Register(ScopeName+":after", after); err != nil {
-		return err
-	}
-	if err := db.Callback().Row().Before("*").Register(ScopeName+":before", before("QUERY")); err != nil {
-		return err
-	}
-	if err := db.Callback().Row().After("*").Register(ScopeName+":after", after); err != nil {
-		return err
-	}
+
 	sqlDB, err := db.DB()
 	if err != nil {
 		return err
@@ -139,9 +127,17 @@ func Transaction(ctx context.Context, db *native.DB, p goslogx.TelemetryProvider
 	if db == nil || fn == nil {
 		return errors.New("gorm instrumentation: nil database or callback")
 	}
-	t, err := telemetry.New(p, ScopeName, "other_sql", false, opts...)
+	cfg := config{}
+	telemetry.ApplyOptions(&cfg.Config, &cfg, opts...)
+	t, err := telemetry.New(p, ScopeName, "other_sql", false, func(c *telemetry.Config) { *c = cfg.Config })
 	if err != nil {
 		return err
 	}
 	return t.Run(ctx, "BEGIN", trace.SpanKindClient, func(ctx context.Context) error { return db.WithContext(ctx).Transaction(fn) })
+}
+
+type callbackRegistration struct {
+	register func(string, func(*native.DB)) error
+	phase    string
+	hook     func(*native.DB)
 }

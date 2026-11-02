@@ -158,3 +158,34 @@ func Name(method, route string) string {
 	}
 	return method
 }
+
+// ResolveForDelegation supplies provider ownership and scope for adapters that
+// delegate to the std plugin. The std boundary applies the privacy policy once;
+// applying it twice would discard already-validated custom attributes/events.
+// The caller must forward Config options to the delegated adapter.
+func ResolveForDelegation(p goslogx.TelemetryProvider, scope string, c Config) Provider {
+	resolved := Resolve(p, scope, c)
+	tp := resolved.TP.(privateTracerProvider)
+	mp := resolved.MP.(privateMeterProvider)
+	resolved.TP = scopeTracerProvider{TracerProvider: tp.TracerProvider, scope: scope}
+	resolved.MP = scopeMeterProvider{MeterProvider: mp.MeterProvider, scope: scope}
+	return resolved
+}
+
+type scopeTracerProvider struct {
+	trace.TracerProvider
+	scope string
+}
+
+func (p scopeTracerProvider) Tracer(_ string, opts ...trace.TracerOption) trace.Tracer {
+	return p.TracerProvider.Tracer(p.scope, opts...)
+}
+
+type scopeMeterProvider struct {
+	metric.MeterProvider
+	scope string
+}
+
+func (p scopeMeterProvider) Meter(_ string, opts ...metric.MeterOption) metric.Meter {
+	return p.MeterProvider.Meter(p.scope, opts...)
+}

@@ -10,13 +10,28 @@ import (
 	"time"
 
 	"github.com/go-pg/pg/v10"
+	"github.com/go-pg/pg/v10/orm"
 	"github.com/muhammadluth/goslogx"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
+
+type testQuery struct{ operation orm.QueryOp }
+
+func (q testQuery) Operation() orm.QueryOp { return q.operation }
+
+type testResult struct {
+	affected int
+	returned int
+}
+
+func (testResult) Model() orm.Model    { return nil }
+func (r testResult) RowsAffected() int { return r.affected }
+func (r testResult) RowsReturned() int { return r.returned }
 
 func TestActualQueryHookWithoutServer(t *testing.T) {
 	recorder := tracetest.NewSpanRecorder()
@@ -109,5 +124,30 @@ func TestNotFoundHook(t *testing.T) {
 	}
 	if recorder.Ended()[0].Status().Code == codes.Error {
 		t.Fatal("not-found recorded as failure")
+	}
+}
+
+func TestRowsAffectedUsesSafeUpstreamBehavior(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	defer tp.Shutdown(context.Background())
+	h := queryHook{tracer: tp.Tracer(instrumentationScope)}
+	event := &pg.QueryEvent{
+		Query:     testQuery{operation: orm.SelectOp},
+		Result:    testResult{affected: -1, returned: 2},
+		StartTime: time.Now(),
+	}
+	ctx, err := h.BeforeQuery(context.Background(), event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.AfterQuery(ctx, event); err != nil {
+		t.Fatal(err)
+	}
+	attrs := recorder.Ended()[0].Attributes()
+	set := attribute.NewSet(attrs...)
+	rows, ok := set.Value("db.rows_affected")
+	if !ok || rows.AsInt64() != 2 {
+		t.Fatalf("rows attribute: %v", attrs)
 	}
 }

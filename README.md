@@ -236,6 +236,27 @@ go get github.com/muhammadluth/goslogx/plugins/messaging/rabbitmq
 
 NATS Core/JetStream, Kafka via franz-go/kafka-go/IBM Sarama, and RabbitMQ.
 
+## PLUGIN TELEMETRY AND OWNERSHIP
+
+Pass the same configured logger to your plugins. It supplies the tracer provider, meter provider
+and propagator through `TelemetryProvider`; absent or disabled signals use no-ops. Plugins do
+not change global providers or shut down application-owned telemetry.
+
+Native instrumentation supplies operation names and measurements: Redis uses command names
+such as `get`, `set` and `redis.pipeline ...`; Bun uses bunotel; pgx uses otelpgx. HTTP and gRPC
+adapters preserve upstream events, links and safe protocol metadata. Raw statements, message
+keys and payloads stay excluded unless a supported diagnostic option explicitly enables capture.
+Use bounded values for metric labels and keep request-specific metadata on spans or logs.
+
+Choose one instrumentation layer for each operation. For asynchronous Kafka, use completion-aware
+wrappers or native kotel hooks so producer spans end at delivery completion. Keep broker commits,
+acknowledgements and client shutdown under application control.
+
+See the [upstream instrumentation catalog](docs/architecture/upstream-instrumentation.md) and
+[integration policy](docs/architecture/integration-policy.md). Existing dashboards should review
+[Bun metric compatibility](docs/integrations/database/bun.md#metrics) and
+[pgx pool metric migration](docs/integrations/database/pgx.md) when upgrading.
+
 ## ARCHITECTURE
 
 ```text

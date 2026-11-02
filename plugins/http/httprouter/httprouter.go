@@ -37,11 +37,24 @@ const (
 
 type paramsKey struct{}
 
+// Fallback instruments a NotFound or MethodNotAllowed handler. Install it on
+// those router fields, not around the router, to avoid duplicate matched spans.
+// An empty route prevents unmatched request paths becoming metric dimensions.
+func Fallback(provider goslogx.TelemetryProvider, next http.Handler, opts ...Option) http.Handler {
+	if next == nil {
+		next = http.NotFoundHandler()
+	}
+	h := Handle(provider, "", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+		next.ServeHTTP(w, r)
+	}, opts...)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { h(w, r, nil) })
+}
+
 // Handle wraps a native handler at registration; pattern must be the same static
 // template passed to Router.Handle. Params remain available without reflection.
 func Handle(provider goslogx.TelemetryProvider, pattern string, next httprouter.Handle, opts ...Option) httprouter.Handle {
 	c := httptelemetry.NewConfig(opts...)
-	p := httptelemetry.Resolve(provider, ScopeName, c)
+	p := httptelemetry.ResolveForDelegation(provider, ScopeName, c)
 	if len(pattern) > 256 {
 		pattern = ""
 	}
@@ -51,6 +64,7 @@ func Handle(provider goslogx.TelemetryProvider, pattern string, next httprouter.
 		}
 		return httptelemetry.Name(r.Method, pattern)
 	})}
+	options = append(options, base.WithTraceAttributes(c.TraceAttributes...), base.WithMetricAttributes(c.MetricAttributes...), base.WithSpanStartOptions(c.Start...), base.WithServerName(c.ServerName))
 	if c.Public {
 		options = append(options, base.WithPublicEndpoint())
 	} else if c.PublicEndpointFn != nil {

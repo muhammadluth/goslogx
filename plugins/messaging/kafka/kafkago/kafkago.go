@@ -19,6 +19,9 @@ type Option = telemetry.Option
 var WithDestinationNormalizer = telemetry.WithDestinationNormalizer
 var WithConsumerGroup = telemetry.WithConsumerGroup
 var WithClientID = telemetry.WithClientID
+var WithTraceAttributes = telemetry.WithTraceAttributes
+var WithMetricAttributes = telemetry.WithMetricAttributes
+var WithPropagator = telemetry.WithPropagator
 var WithTracing = telemetry.WithTracing
 var WithMetrics = telemetry.WithMetrics
 
@@ -70,6 +73,9 @@ func New(p goslogx.TelemetryProvider, opts ...Option) (*Instrumentation, error) 
 func (i *Instrumentation) WriteMessages(ctx context.Context, writer Writer, messages ...kafka.Message) (err error) {
 	if telemetry.Nil(writer) {
 		return errors.New("kafkago instrumentation: nil writer")
+	}
+	if async, ok := writer.(*AsyncWriter); ok {
+		return async.WriteMessages(ctx, messages...)
 	}
 	if native, ok := writer.(*kafka.Writer); ok && native.Async {
 		return errors.New("kafkago instrumentation: async writer requires native completion-based instrumentation")

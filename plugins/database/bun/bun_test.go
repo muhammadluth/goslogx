@@ -34,7 +34,7 @@ func TestQueriesProvidersPrivacy(t *testing.T) {
 	defer mp.Shutdown(context.Background())
 	// Preserve the core singleton New behavior: configure this test process once.
 	logger := goslogx.New(goslogx.WithTracerProvider(tp), goslogx.WithMeterProvider(mp))
-	if err := Instrument(db, logger, WithDBName("payment"), WithQueryStatement(false)); err != nil {
+	if err := Instrument(db, logger, WithDBName("payment"), WithQueryStatement(false), WithCompatibilityMetrics(true)); err != nil {
 		t.Fatal(err)
 	}
 	ctx, parent := logger.StartSpan(context.Background(), "parent")
@@ -65,7 +65,7 @@ func TestQueriesProvidersPrivacy(t *testing.T) {
 			t.Fatal("secret leak")
 		}
 	}
-	if spans[2].Name() != "QUERY" || spans[2].Status().Code != codes.Error || len(spans[2].Events()) != 0 {
+	if spans[2].Name() != "QUERY" || spans[2].Status().Code != codes.Error || len(spans[2].Events()) != 1 {
 		t.Fatal("error policy")
 	}
 	var data metricdata.ResourceMetrics
@@ -130,7 +130,8 @@ func TestDisabledAndValidation(t *testing.T) {
 
 func BenchmarkHook(b *testing.B) {
 	logger := goslogx.New()
-	h := &queryHook{tracer: logger.Tracer(instrumentationScope), attributes: []attribute.KeyValue{attribute.String("db.namespace", "payment")}}
+	duration, _ := logger.Meter(instrumentationScope).Float64Histogram("db.client.operation.duration")
+	h := &metricsHook{duration: duration, attributes: []attribute.KeyValue{attribute.String("db.namespace", "payment")}}
 	event := &upbun.QueryEvent{Query: "SELECT 1"}
 	for b.Loop() {
 		ctx := h.BeforeQuery(context.Background(), event)

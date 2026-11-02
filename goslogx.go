@@ -228,7 +228,7 @@ func setupLog(opts ...Option) *Logger {
 	encoderConfig.CallerKey = "source"
 	encoderConfig.FunctionKey = "function"
 	encoderConfig.StacktraceKey = "stack_trace"
-	encoderConfig.EncodeCaller = zapcore.ShortCallerEncoder
+	encoderConfig.EncodeCaller = EncodeCaller
 
 	// Use custom writer for zero-allocation stack trace formatting
 	writer := &stackTraceFormattingWriter{

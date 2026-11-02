@@ -19,6 +19,9 @@ type Option = telemetry.Option
 var WithDestinationNormalizer = telemetry.WithDestinationNormalizer
 var WithConsumerGroup = telemetry.WithConsumerGroup
 var WithClientID = telemetry.WithClientID
+var WithTraceAttributes = telemetry.WithTraceAttributes
+var WithMetricAttributes = telemetry.WithMetricAttributes
+var WithPropagator = telemetry.WithPropagator
 var WithTracing = telemetry.WithTracing
 var WithMetrics = telemetry.WithMetrics
 
@@ -103,6 +106,10 @@ func (i *Instrumentation) SendMessages(ctx context.Context, producer SyncProduce
 	}
 	err = producer.SendMessages(copies)
 	perMessage := make(map[*native.ProducerMessage]error)
+	originals := make(map[*native.ProducerMessage]*native.ProducerMessage, len(copies))
+	for index, copy := range copies {
+		originals[copy] = messages[index]
+	}
 	var batchErrors native.ProducerErrors
 	if errors.As(err, &batchErrors) {
 		for _, failure := range batchErrors {
@@ -118,6 +125,11 @@ func (i *Instrumentation) SendMessages(ctx context.Context, producer SyncProduce
 		headers := messages[index].Headers
 		*messages[index] = *copy
 		messages[index].Headers = headers
+	}
+	for _, failure := range batchErrors {
+		if original, ok := originals[failure.Msg]; ok {
+			failure.Msg = original
+		}
 	}
 	return err
 }

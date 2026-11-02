@@ -2,6 +2,7 @@ package std
 
 import (
 	"context"
+	"github.com/muhammadluth/goslogx/internal/integration/privacy"
 	"strings"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -24,25 +25,25 @@ func safeAttributes(input []attribute.KeyValue) []attribute.KeyValue {
 			if a.Value.Type() != attribute.STRING || a.Value.AsString() == "" {
 				continue
 			}
-			a = attribute.String("error.type", "http_error")
+			a = attribute.String("error.type", privacy.ErrorLabel(a.Value.AsString(), "http_error"))
 			output = append(output, a)
 			continue
-		case "http.request.method":
+		case "http.request.method", "http.method":
 			if a.Value.Type() == attribute.STRING {
 				switch a.Value.AsString() {
 				case "GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH", "_OTHER":
 					output = append(output, a)
 				}
 			}
-		case "http.response.status_code":
+		case "http.response.status_code", "http.status_code":
 			if a.Value.Type() == attribute.INT64 && a.Value.AsInt64() >= 100 && a.Value.AsInt64() <= 599 {
 				output = append(output, a)
 			}
-		case "http.request.body.size", "http.response.body.size":
+		case "http.request.body.size", "http.response.body.size", "http.request_content_length", "http.response_content_length":
 			if a.Value.Type() == attribute.INT64 && a.Value.AsInt64() >= 0 {
 				output = append(output, a)
 			}
-		case "url.scheme":
+		case "url.scheme", "http.scheme":
 			if a.Value.Type() == attribute.STRING && (a.Value.AsString() == "http" || a.Value.AsString() == "https") {
 				output = append(output, a)
 			}
@@ -50,7 +51,7 @@ func safeAttributes(input []attribute.KeyValue) []attribute.KeyValue {
 			if a.Value.Type() == attribute.STRING && a.Value.AsString() == "http" {
 				output = append(output, a)
 			}
-		case "network.protocol.version":
+		case "network.protocol.version", "http.flavor":
 			if a.Value.Type() == attribute.STRING {
 				switch a.Value.AsString() {
 				case "1.0", "1.1", "2", "3":
@@ -67,7 +68,7 @@ func safeMetricAttributes(input []attribute.KeyValue) []attribute.KeyValue {
 	attributes := safeAttributes(input)
 	result := attributes[:0]
 	for _, a := range attributes {
-		if a.Key != "http.request.body.size" && a.Key != "http.response.body.size" {
+		if a.Key != "http.request.body.size" && a.Key != "http.response.body.size" && a.Key != "http.request_content_length" && a.Key != "http.response_content_length" {
 			result = append(result, a)
 		}
 	}
@@ -108,16 +109,6 @@ func decodeConfiguredMetricAttributes(input []attribute.KeyValue) []attribute.Ke
 	return safeConfiguredMetricAttributes(result)
 }
 
-func safeMessageAttributes(input []attribute.KeyValue) []attribute.KeyValue {
-	result := make([]attribute.KeyValue, 0, len(input))
-	for _, a := range input {
-		if (a.Key == "http.read_bytes" || a.Key == "http.wrote_bytes") && a.Value.Type() == attribute.INT64 && a.Value.AsInt64() >= 0 {
-			result = append(result, a)
-		}
-	}
-	return result
-}
-
 type privateTracerProvider struct {
 	trace.TracerProvider
 	route         string
@@ -148,7 +139,7 @@ func (t privateTracer) Start(ctx context.Context, name string, opts ...trace.Spa
 		clean = append(clean, trace.WithNewRoot())
 	}
 	for _, link := range c.Links() {
-		clean = append(clean, trace.WithLinks(trace.Link{SpanContext: link.SpanContext}))
+		clean = append(clean, trace.WithLinks(privacy.Link(link)))
 	}
 	clean = append(clean, trace.WithAttributes(t.provider.attributes...))
 	ctx, span := t.Tracer.Start(ctx, name, clean...)
@@ -165,17 +156,20 @@ func (s privateSpan) TracerProvider() trace.TracerProvider { return s.provider }
 func (s privateSpan) SetAttributes(attributes ...attribute.KeyValue) {
 	s.Span.SetAttributes(safeAttributes(attributes)...)
 }
-func (s privateSpan) SetStatus(code codes.Code, _ string)     { s.Span.SetStatus(code, "") }
-func (s privateSpan) RecordError(error, ...trace.EventOption) {}
+func (s privateSpan) SetStatus(code codes.Code, description string) {
+	s.Span.SetStatus(code, privacy.StatusDescription(code, description))
+}
+func (s privateSpan) RecordError(err error, opts ...trace.EventOption) {
+	privacy.RecordError(s.Span, err, opts...)
+}
 func (s privateSpan) AddEvent(name string, opts ...trace.EventOption) {
-	if !s.provider.messageEvents || (name != "read" && name != "write") {
+	if (name == "read" || name == "write") && !s.provider.messageEvents {
 		return
 	}
-	c := trace.NewEventConfig(opts...)
-	s.Span.AddEvent(name, trace.WithTimestamp(c.Timestamp()), trace.WithAttributes(safeMessageAttributes(c.Attributes())...))
+	privacy.Event(s.Span, name, opts...)
 }
 func (s privateSpan) AddLink(link trace.Link) {
-	s.Span.AddLink(trace.Link{SpanContext: link.SpanContext})
+	s.Span.AddLink(privacy.Link(link))
 }
 
 type privateMeterProvider struct {
@@ -233,3 +227,5 @@ type privateFloat64Histogram struct {
 func (h privateFloat64Histogram) Record(ctx context.Context, value float64, opts ...metric.RecordOption) {
 	h.Float64Histogram.Record(ctx, value, recordOptions(opts, h.attributes)...)
 }
+
+func (s privateSpan) End(opts ...trace.SpanEndOption) { privacy.End(s.Span, recover(), opts...) }

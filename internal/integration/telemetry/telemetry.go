@@ -5,11 +5,13 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/muhammadluth/goslogx"
+	"github.com/muhammadluth/goslogx/internal/integration/privacy"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
@@ -21,11 +23,17 @@ import (
 
 type Option func(*Config)
 type Config struct {
+	optionTarget                         any
 	Normalizer                           func(string) string
 	Namespace, Consumer, Group, ClientID string
 	RoutingNormalizer                    func(string) string
 	StatementCapture                     bool
+	RawStatement                         bool
+	ConsumerLinks                        bool
 	StatementSanitizer                   func(string) string
+	Propagator                           propagation.TextMapPropagator
+	TraceAttributes, MetricAttributes    []attribute.KeyValue
+	CallerEnabled                        bool
 	TracingDisabled, MetricsDisabled     bool
 	OnError                              func(error)
 }
@@ -33,15 +41,78 @@ type Config struct {
 func WithDestinationNormalizer(f func(string) string) Option {
 	return func(c *Config) { c.Normalizer = f }
 }
-func WithDBName(name string) Option        { return func(c *Config) { c.Namespace = static(name) } }
-func WithConsumerName(name string) Option  { return func(c *Config) { c.Consumer = static(name) } }
-func WithConsumerGroup(name string) Option { return func(c *Config) { c.Group = static(name) } }
-func WithClientID(name string) Option      { return func(c *Config) { c.ClientID = static(name) } }
+func WithDBName(name string) Option {
+	return func(c *Config) {
+		c.Namespace = static(name)
+		if c.Namespace != "" {
+			c.TraceAttributes = append(c.TraceAttributes, attribute.String("db.name", c.Namespace))
+		}
+	}
+}
+
+// WithDBUser emits an explicitly configured user on spans only.
+func WithDBUser(user string) Option {
+	return func(c *Config) {
+		if user != "" && len(user) <= 256 {
+			c.TraceAttributes = append(c.TraceAttributes, attribute.String("db.user", user))
+		}
+	}
+}
+
+// WithServerEndpoint emits a configured server endpoint on spans only.
+func WithServerEndpoint(address string, port int) Option {
+	return func(c *Config) {
+		if address == "" || len(address) > 256 || port < 0 || port > 65535 {
+			return
+		}
+		c.TraceAttributes = append(c.TraceAttributes, attribute.String("server.address", address))
+		if port != 0 {
+			c.TraceAttributes = append(c.TraceAttributes, attribute.Int("server.port", port))
+		}
+	}
+}
+
+// WithCallerEnabled captures the first application frame for native wrappers.
+// Source path information can be sensitive, so this is opt-in.
+func WithCallerEnabled(enabled bool) Option { return func(c *Config) { c.CallerEnabled = enabled } }
+func WithConsumerName(name string) Option   { return func(c *Config) { c.Consumer = static(name) } }
+func WithConsumerGroup(name string) Option  { return func(c *Config) { c.Group = static(name) } }
+func WithClientID(name string) Option       { return func(c *Config) { c.ClientID = static(name) } }
 func WithStatementCapture(enabled bool) Option {
 	return func(c *Config) { c.StatementCapture = enabled }
 }
 func WithStatementSanitizer(f func(string) string) Option {
 	return func(c *Config) { c.StatementSanitizer = f }
+}
+
+// WithRawStatement explicitly permits sensitive query text in trusted diagnostics.
+func WithRawStatement(enabled bool) Option {
+	return func(c *Config) { c.RawStatement = enabled; c.StatementCapture = enabled }
+}
+func WithPropagator(p propagation.TextMapPropagator) Option {
+	return func(c *Config) { c.Propagator = p }
+}
+
+// WithConsumerLinks requests links instead of parentage in native consumers
+// whose upstream instrumentation supports this relationship.
+func WithConsumerLinks(enabled bool) Option { return func(c *Config) { c.ConsumerLinks = enabled } }
+func WithTraceAttributes(attrs ...attribute.KeyValue) Option {
+	copy := privacy.Attributes(attrs)
+	return func(c *Config) { c.TraceAttributes = append(c.TraceAttributes, copy...) }
+}
+
+// WithMetricAttributes accepts static bounded deployment labels, never request IDs.
+func WithMetricAttributes(attrs ...attribute.KeyValue) Option {
+	var safe []attribute.KeyValue
+	for _, a := range attrs {
+		switch a.Key {
+		case "app.channel", "app.region", "app.tier", "service.version", "deployment.environment.name":
+			if a.Value.Type() == attribute.STRING && len(a.Value.AsString()) <= 128 {
+				safe = append(safe, a)
+			}
+		}
+	}
+	return func(c *Config) { c.MetricAttributes = append(c.MetricAttributes, safe...) }
 }
 func WithTracing(enabled bool) Option       { return func(c *Config) { c.TracingDisabled = !enabled } }
 func WithMetrics(enabled bool) Option       { return func(c *Config) { c.MetricsDisabled = !enabled } }
@@ -80,6 +151,9 @@ func Resolve(provider goslogx.TelemetryProvider, cfg Config) (trace.TracerProvid
 			prop = p
 		}
 	}
+	if !Nil(cfg.Propagator) {
+		prop = cfg.Propagator
+	}
 	return tp, mp, prop
 }
 
@@ -103,7 +177,7 @@ func New(provider goslogx.TelemetryProvider, scope, system string, messaging boo
 			opt(&cfg)
 		}
 	}
-	if cfg.StatementCapture && cfg.StatementSanitizer == nil {
+	if cfg.StatementCapture && cfg.StatementSanitizer == nil && !cfg.RawStatement {
 		return nil, errors.New("instrumentation: statement capture requires an explicit sanitizer")
 	}
 	tp, mp, prop := Resolve(provider, cfg)
@@ -221,7 +295,12 @@ func (t *Instrumentation) BeginCount(ctx context.Context, op, destination string
 			name = dest + " " + op
 		}
 	}
-	ctx, span := t.Tracer.Start(ctx, name, trace.WithSpanKind(kind), trace.WithAttributes(attrs...))
+	spanAttrs := append(append([]attribute.KeyValue(nil), t.Config.TraceAttributes...), attrs...)
+	if !t.messaging && t.Config.CallerEnabled {
+		spanAttrs = append(spanAttrs, callerAttributes()...)
+	}
+	attrs = append(attrs, t.Config.MetricAttributes...)
+	ctx, span := t.Tracer.Start(ctx, name, trace.WithSpanKind(kind), trace.WithAttributes(spanAttrs...))
 	started := time.Now()
 	var once sync.Once
 	return ctx, func(err error) {
@@ -229,13 +308,11 @@ func (t *Instrumentation) BeginCount(ctx context.Context, op, destination string
 			defer span.End()
 			recorded := attrs
 			if err != nil {
-				errorType := "database_error"
-				if t.messaging {
-					errorType = "messaging_error"
-				}
+				errorType := privacy.ErrorType(err)
 				a := attribute.String("error.type", errorType)
 				span.SetAttributes(a)
-				span.SetStatus(codes.Error, "")
+				privacy.RecordError(span, err)
+				span.SetStatus(codes.Error, privacy.StatusDescription(codes.Error, ""))
 				recorded = append(append([]attribute.KeyValue(nil), attrs...), a)
 			}
 			hist := t.duration
@@ -255,7 +332,28 @@ func (t *Instrumentation) BeginCount(ctx context.Context, op, destination string
 	}
 }
 
-// Process extracts the configured propagator, records receipt, then processing.
+func callerAttributes() []attribute.KeyValue {
+	var pcs [24]uintptr
+	n := runtime.Callers(2, pcs[:])
+	frames := runtime.CallersFrames(pcs[:n])
+	for {
+		frame, more := frames.Next()
+		if !strings.Contains(frame.Function, "github.com/muhammadluth/goslogx/") &&
+			!strings.HasPrefix(frame.Function, "runtime.") && frame.File != "" {
+			return []attribute.KeyValue{
+				attribute.String("code.function", frame.Function),
+				attribute.String("code.filepath", frame.File),
+				attribute.Int("code.lineno", frame.Line),
+			}
+		}
+		if !more {
+			break
+		}
+	}
+	return nil
+}
+
+// Process extracts the configured propagator and measures handler execution.
 // It neither acknowledges messages nor changes callback errors.
 func (t *Instrumentation) Process(ctx context.Context, carrier propagation.TextMapCarrier, destination string, fn func(context.Context) error) (err error) {
 	if ctx == nil {
@@ -264,9 +362,15 @@ func (t *Instrumentation) Process(ctx context.Context, carrier propagation.TextM
 	if carrier != nil {
 		ctx = t.Propagator.Extract(ctx, carrier)
 	}
-	ctx, received := t.Begin(ctx, "receive", destination, trace.SpanKindConsumer)
-	received(nil)
 	ctx, finish := t.BeginCount(ctx, "process", destination, trace.SpanKindConsumer, 0)
+	// Delivery is observable at callback entry; it does not require inventing a
+	// zero-duration receive span, and it is counted even when processing fails.
+	// consumed is only allocated for messaging instrumentations; guard defensively
+	// so a database Instrumentation cannot panic if Process is ever misused.
+	attrs := append(t.attributes("receive", t.Destination(destination)), t.Config.MetricAttributes...)
+	if t.consumed != nil {
+		t.consumed.Add(ctx, 1, metric.WithAttributes(attrs...))
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			finish(errors.New("message handler panic"))
@@ -280,11 +384,24 @@ func (t *Instrumentation) Statement(ctx context.Context, statement string) {
 	if !t.Config.StatementCapture {
 		return
 	}
-	sanitized := t.Config.StatementSanitizer(statement)
-	if len(sanitized) > 4096 {
-		sanitized = sanitized[:4096]
-	}
+	sanitized := t.Config.QueryText(statement)
 	trace.SpanFromContext(ctx).SetAttributes(attribute.String("db.query.text", sanitized))
+}
+
+// QueryText applies the explicit capture policy without ever making text a metric label.
+func (c Config) QueryText(statement string) string {
+	if !c.StatementCapture {
+		return ""
+	}
+	if c.StatementSanitizer != nil {
+		statement = c.StatementSanitizer(statement)
+	} else if !c.RawStatement {
+		return ""
+	}
+	if len(statement) > 4096 {
+		statement = statement[:4096]
+	}
+	return statement
 }
 func (t *Instrumentation) Report(err error) {
 	if err != nil && t.Config.OnError != nil {
@@ -293,7 +410,7 @@ func (t *Instrumentation) Report(err error) {
 }
 func DBOperation(op string) string {
 	switch strings.ToUpper(op) {
-	case "SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP", "TRUNCATE", "BEGIN", "COMMIT", "ROLLBACK", "QUERY", "EXEC", "CONNECT", "PING", "BATCH", "COPY", "FIND", "INSERTONE", "INSERTMANY", "UPDATEONE", "UPDATEMANY", "DELETEONE", "DELETEMANY", "AGGREGATE", "GETITEM", "PUTITEM", "UPDATEITEM", "DELETEITEM", "SCAN", "BATCHGETITEM", "BATCHWRITEITEM", "TRANSACTGETITEMS", "TRANSACTWRITEITEMS", "SEARCH", "INDEX", "BULK", "RUN", "NEXT", "CLOSE":
+	case "MATCH", "OPTIONAL", "MERGE", "RETURN", "CALL", "UNWIND", "WITH", "LOAD", "PROFILE", "EXPLAIN", "SET", "DETACH", "REMOVE", "SHOW", "SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP", "TRUNCATE", "BEGIN", "COMMIT", "ROLLBACK", "QUERY", "EXEC", "CONNECT", "PING", "BATCH", "COPY", "FIND", "INSERTONE", "INSERTMANY", "UPDATEONE", "UPDATEMANY", "DELETEONE", "DELETEMANY", "AGGREGATE", "GETITEM", "PUTITEM", "UPDATEITEM", "DELETEITEM", "SCAN", "BATCHGETITEM", "BATCHWRITEITEM", "TRANSACTGETITEMS", "TRANSACTWRITEITEMS", "SEARCH", "INDEX", "BULK", "RUN", "NEXT", "CLOSE":
 		return strings.ToUpper(op)
 	}
 	return "QUERY"
@@ -324,7 +441,8 @@ func (t *Instrumentation) Inject(ctx context.Context, carrier propagation.TextMa
 func (t *Instrumentation) RecordDatabase(ctx context.Context, op string, elapsed time.Duration, err error) {
 	attrs := t.attributes(DBOperation(op), "")
 	if err != nil {
-		attrs = append(attrs, attribute.String("error.type", "database_error"))
+		attrs = append(attrs, attribute.String("error.type", privacy.ErrorType(err)))
 	}
+	attrs = append(attrs, t.Config.MetricAttributes...)
 	t.duration.Record(ctx, elapsed.Seconds(), metric.WithAttributes(attrs...))
 }

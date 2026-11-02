@@ -9,10 +9,15 @@ while IFS= read -r manifest; do
   modules+=("$module")
 done < <(find "$repo" -name .git -prune -o -name go.mod -print | sort)
 if (( $# > 0 )); then modules=("$@"); fi
+workspaces=$(mktemp -d)
+trap 'rm -rf "$workspaces"' EXIT
 for module in "${modules[@]}"; do
   (
     cd "$repo/$module"
     echo "Validating module: $module"
+    export GOWORK="$workspaces/${module//\//_}.work"
+    version=$(python3 "$repo/scripts/module-workspace.py" "$module" "$GOWORK")
+    export GOTOOLCHAIN="go${version}"
     go mod tidy
     go vet ./...
     go test ./...

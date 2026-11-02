@@ -202,7 +202,7 @@ func TestOptionConfigurationAndPrivateTelemetry(t *testing.T) {
 	span.AddLink(trace.Link{SpanContext: trace.NewSpanContext(trace.SpanContextConfig{TraceID: trace.TraceID{1}, SpanID: trace.SpanID{1}})})
 	span.End()
 	spans := p.Recorder.Ended()
-	if len(spans) != 1 || spans[0].Name() != "grpc.health.v1.Health/Check" || strings.Contains(fmt.Sprint(spans[0]), "SECRET") {
+	if len(spans) != 1 || spans[0].Name() != "/grpc.health.v1.Health/Check" || strings.Contains(fmt.Sprint(spans[0]), "SECRET") {
 		t.Fatalf("private telemetry leaked or changed span: %#v", spans)
 	}
 }

@@ -4,7 +4,8 @@ package pgx
 import (
 	"context"
 	"errors"
-	"strings"
+	"fmt"
+	"github.com/exaring/otelpgx"
 
 	native "github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -17,26 +18,71 @@ import (
 
 const ScopeName = "github.com/muhammadluth/goslogx/plugins/database/pgx"
 
-type Option = telemetry.Option
-
-var WithDBName = telemetry.WithDBName
-var WithStatementCapture = telemetry.WithStatementCapture
-var WithStatementSanitizer = telemetry.WithStatementSanitizer
-var WithTracing = telemetry.WithTracing
-var WithMetrics = telemetry.WithMetrics
-
-type tracer struct{ t *telemetry.Instrumentation }
-type queryKey struct{}
-type batchKey struct{}
-type copyKey struct{}
-type connectKey struct{}
+// Upstream owns telemetry. The adapter only fills its root-span gap:
+// otelpgx 0.13.0 skips starting a span without an already recording parent.
+type tracer struct {
+	*otelpgx.Tracer
+	root   trace.Tracer
+	config config
+}
 
 func newTracer(p goslogx.TelemetryProvider, opts []Option) (*tracer, error) {
-	t, err := telemetry.New(p, ScopeName, "postgresql", false, opts...)
-	if err != nil {
-		return nil, err
+	cfg := config{}
+	telemetry.ApplyOptions(&cfg.Config, &cfg, opts...)
+	if cfg.StatementCapture && cfg.StatementSanitizer == nil && !cfg.RawStatement {
+		return nil, errors.New("pgx: statement capture requires a sanitizer")
 	}
-	return &tracer{t}, nil
+	tp, mp, _ := telemetry.Resolve(p, cfg.Config)
+	tp = telemetry.ConfiguredDBProvider(tp, ScopeName, cfg.Config, telemetry.DBPolicy{ExtraAttributes: cfg.parameterAttributes})
+	attrs := append([]attribute.KeyValue(nil), cfg.TraceAttributes...)
+	metricAttrs := append([]attribute.KeyValue(nil), cfg.MetricAttributes...)
+	if cfg.Namespace != "" {
+		attrs = append(attrs, attribute.String("db.namespace", cfg.Namespace))
+		metricAttrs = append(metricAttrs, attribute.String("db.namespace", cfg.Namespace))
+	}
+	var initErr error
+	nativeOptions := []otelpgx.Option{otelpgx.WithTracerProvider(tp), otelpgx.WithMeterProvider(scopedMeter{MeterProvider: mp, initErr: &initErr}), otelpgx.WithTracerAttributes(attrs...), otelpgx.WithMeterAttributes(metricAttrs...), otelpgx.WithSpanNameCtxFunc(cfg.operation), otelpgx.WithMetricOperationName(operation)}
+	if cfg.parameters != nil || cfg.rawParameters {
+		nativeOptions = append(nativeOptions, otelpgx.WithIncludeQueryParameters(cfg.parameterFilter))
+	}
+	if cfg.acquireDisabled {
+		nativeOptions = append(nativeOptions, otelpgx.WithDisableAcquireTracer())
+	}
+	if cfg.connectionDetailsDisabled {
+		nativeOptions = append(nativeOptions, otelpgx.WithDisableConnectionDetailsInAttributes())
+	}
+	if cfg.prefix {
+		nativeOptions = append(nativeOptions, otelpgx.WithQuerySpanNamePrefix())
+	}
+	native := otelpgx.NewTracer(nativeOptions...)
+	if initErr != nil {
+		return nil, initErr
+	}
+	return &tracer{Tracer: native, root: tp.Tracer(ScopeName, trace.WithInstrumentationVersion("0.13.0")), config: cfg}, nil
+}
+func operation(ctx context.Context, sql string) string {
+	return telemetry.DBOperation(otelpgx.SQLOperationName(ctx, sql))
+}
+func op(sql string) string { return operation(context.Background(), sql) }
+func (t *tracer) rootContext(parent, ctx context.Context, name, sql string, cfg *native.ConnConfig, attrs ...attribute.KeyValue) context.Context {
+	if trace.SpanFromContext(parent).IsRecording() {
+		return ctx
+	}
+	attrs = append(attrs, attribute.String("db.system.name", "postgresql"))
+	if sql != "" {
+		attrs = append(attrs, attribute.String("db.operation.name", t.config.operation(ctx, sql)), attribute.String("db.query.text", sql))
+	}
+	if cfg != nil && !t.config.connectionDetailsDisabled {
+		attrs = append(attrs, attribute.String("server.address", cfg.Host), attribute.Int("server.port", int(cfg.Port)), attribute.String("db.namespace", cfg.Database))
+	}
+	ctx, _ = t.root.Start(ctx, name, trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(attrs...))
+	return ctx
+}
+func connConfig(conn *native.Conn) *native.ConnConfig {
+	if conn == nil {
+		return nil
+	}
+	return conn.Config()
 }
 
 // InstrumentConfig configures a pool before construction. Existing tracers are never overwritten.
@@ -60,58 +106,42 @@ func InstrumentConnConfig(config *native.ConnConfig, p goslogx.TelemetryProvider
 	config.Tracer = t
 	return nil
 }
-func op(query string) string {
-	fields := strings.Fields(query)
-	if len(fields) == 0 {
-		return "QUERY"
-	}
-	return telemetry.DBOperation(fields[0])
-}
-func (t *tracer) TraceQueryStart(ctx context.Context, _ *native.Conn, data native.TraceQueryStartData) context.Context {
-	ctx, finish := t.t.Begin(ctx, op(data.SQL), "", trace.SpanKindClient)
-	t.t.Statement(ctx, data.SQL)
-	return context.WithValue(ctx, queryKey{}, finish)
-}
-func (t *tracer) TraceQueryEnd(ctx context.Context, _ *native.Conn, data native.TraceQueryEndData) {
-	if finish, ok := ctx.Value(queryKey{}).(func(error)); ok {
-		err := data.Err
-		if errors.Is(err, native.ErrNoRows) {
-			err = nil
+func (t *tracer) TraceQueryStart(ctx context.Context, conn *native.Conn, data native.TraceQueryStartData) context.Context {
+	var attrs []attribute.KeyValue
+	if !trace.SpanFromContext(ctx).IsRecording() && (t.config.parameters != nil || t.config.rawParameters) && (t.config.parameterFilter == nil || t.config.parameterFilter(data.SQL)) {
+		values := make([]string, len(data.Args))
+		for i, arg := range data.Args {
+			values[i] = fmt.Sprintf("%+v", arg)
 		}
-		finish(err)
+		attrs = append(attrs, attribute.StringSlice("pgx.query.parameters", values))
 	}
+	return t.rootContext(ctx, t.Tracer.TraceQueryStart(ctx, conn, data), t.config.name(ctx, data.SQL, "query "), data.SQL, connConfig(conn), attrs...)
 }
-func (t *tracer) TraceBatchStart(ctx context.Context, _ *native.Conn, _ native.TraceBatchStartData) context.Context {
-	ctx, finish := t.t.Begin(ctx, "BATCH", "", trace.SpanKindClient)
-	return context.WithValue(ctx, batchKey{}, finish)
-}
-func (t *tracer) TraceBatchQuery(ctx context.Context, _ *native.Conn, data native.TraceBatchQueryData) {
-	ctx, finish := t.t.Begin(ctx, op(data.SQL), "", trace.SpanKindClient)
-	t.t.Statement(ctx, data.SQL)
-	finish(data.Err)
-}
-func (t *tracer) TraceBatchEnd(ctx context.Context, _ *native.Conn, data native.TraceBatchEndData) {
-	if finish, ok := ctx.Value(batchKey{}).(func(error)); ok {
-		finish(data.Err)
+func (t *tracer) TraceBatchStart(ctx context.Context, conn *native.Conn, data native.TraceBatchStartData) context.Context {
+	size := 0
+	if data.Batch != nil {
+		size = data.Batch.Len()
 	}
+	return t.rootContext(ctx, t.Tracer.TraceBatchStart(ctx, conn, data), "batch start", "", connConfig(conn), attribute.Int("db.operation.batch.size", size))
 }
-func (t *tracer) TraceCopyFromStart(ctx context.Context, _ *native.Conn, _ native.TraceCopyFromStartData) context.Context {
-	ctx, finish := t.t.Begin(ctx, "COPY", "", trace.SpanKindClient)
-	return context.WithValue(ctx, copyKey{}, finish)
+func (t *tracer) TraceCopyFromStart(ctx context.Context, conn *native.Conn, data native.TraceCopyFromStartData) context.Context {
+	return t.rootContext(ctx, t.Tracer.TraceCopyFromStart(ctx, conn, data), "copy_from "+data.TableName.Sanitize(), "", connConfig(conn), attribute.String("db.collection.name", data.TableName.Sanitize()))
 }
-func (t *tracer) TraceCopyFromEnd(ctx context.Context, _ *native.Conn, data native.TraceCopyFromEndData) {
-	if finish, ok := ctx.Value(copyKey{}).(func(error)); ok {
-		finish(data.Err)
+func (t *tracer) TraceConnectStart(ctx context.Context, data native.TraceConnectStartData) context.Context {
+	return t.rootContext(ctx, t.Tracer.TraceConnectStart(ctx, data), "connect", "", data.ConnConfig)
+}
+func (t *tracer) TracePrepareStart(ctx context.Context, conn *native.Conn, data native.TracePrepareStartData) context.Context {
+	return t.rootContext(ctx, t.Tracer.TracePrepareStart(ctx, conn, data), t.config.name(ctx, data.SQL, "prepare "), data.SQL, connConfig(conn), attribute.String("pgx.prepare_stmt.name", data.Name))
+}
+func (t *tracer) TraceAcquireStart(ctx context.Context, pool *pgxpool.Pool, data pgxpool.TraceAcquireStartData) context.Context {
+	if t.config.acquireDisabled {
+		return ctx
 	}
-}
-func (t *tracer) TraceConnectStart(ctx context.Context, _ native.TraceConnectStartData) context.Context {
-	ctx, finish := t.t.Begin(ctx, "CONNECT", "", trace.SpanKindClient)
-	return context.WithValue(ctx, connectKey{}, finish)
-}
-func (t *tracer) TraceConnectEnd(ctx context.Context, data native.TraceConnectEndData) {
-	if finish, ok := ctx.Value(connectKey{}).(func(error)); ok {
-		finish(data.Err)
+	var cfg *native.ConnConfig
+	if pool != nil {
+		cfg = pool.Config().ConnConfig
 	}
+	return t.rootContext(ctx, t.Tracer.TraceAcquireStart(ctx, pool, data), "pool.acquire", "", cfg)
 }
 
 // ObservePool adds pool observations after pool construction. Provider and pool lifetimes should match.
@@ -119,37 +149,51 @@ func ObservePool(pool *pgxpool.Pool, p goslogx.TelemetryProvider, opts ...Option
 	if pool == nil {
 		return errors.New("pgx instrumentation: nil pool")
 	}
-	cfg := telemetry.Config{}
-	for _, opt := range opts {
-		if opt != nil {
-			opt(&cfg)
-		}
-	}
-	_, mp, _ := telemetry.Resolve(p, cfg)
-	meter := mp.Meter(ScopeName)
-	attrs := []attribute.KeyValue{attribute.String("db.system.name", "postgresql")}
+	cfg := config{}
+	telemetry.ApplyOptions(&cfg.Config, &cfg, opts...)
+	_, mp, _ := telemetry.Resolve(p, cfg.Config)
+	attrs := append([]attribute.KeyValue{attribute.String("db.client.connection.pool.name", "pgx")}, cfg.MetricAttributes...)
 	if cfg.Namespace != "" {
 		attrs = append(attrs, attribute.String("db.namespace", cfg.Namespace))
 	}
-	_, err := meter.Int64ObservableUpDownCounter("db.client.connection.count", metric.WithUnit("{connection}"), metric.WithInt64Callback(func(ctx context.Context, o metric.Int64Observer) error {
-		s := pool.Stat()
-		used := append(append([]attribute.KeyValue(nil), attrs...), attribute.String("db.client.connection.state", "used"))
-		idle := append(append([]attribute.KeyValue(nil), attrs...), attribute.String("db.client.connection.state", "idle"))
-		o.Observe(int64(s.AcquiredConns()), metric.WithAttributes(used...))
-		o.Observe(int64(s.IdleConns()), metric.WithAttributes(idle...))
-		return nil
-	}))
-	if err != nil {
-		return err
-	}
-	_, err = meter.Int64ObservableUpDownCounter("db.client.connection.max", metric.WithUnit("{connection}"), metric.WithInt64Callback(func(ctx context.Context, o metric.Int64Observer) error {
-		o.Observe(int64(pool.Stat().MaxConns()), metric.WithAttributes(attrs...))
-		return nil
-	}))
-	return err
+	return otelpgx.RecordStats(pool, otelpgx.WithStatsMeterProvider(scopedMeter{MeterProvider: mp}), otelpgx.WithStatsAttributes(attrs...), otelpgx.WithMinimumReadDBStatsInterval(cfg.poolStatsInterval))
+}
+
+type scopedMeter struct {
+	metric.MeterProvider
+	initErr *error
+}
+
+func (p scopedMeter) Meter(_ string, opts ...metric.MeterOption) metric.Meter {
+	return initializingMeter{Meter: p.MeterProvider.Meter(ScopeName, opts...), initErr: p.initErr}
 }
 
 var _ native.QueryTracer = (*tracer)(nil)
 var _ native.BatchTracer = (*tracer)(nil)
 var _ native.CopyFromTracer = (*tracer)(nil)
 var _ native.ConnectTracer = (*tracer)(nil)
+
+var _ native.PrepareTracer = (*tracer)(nil)
+var _ pgxpool.AcquireTracer = (*tracer)(nil)
+
+// Upstream reports instrument failures through otel.Handle; also return them to
+// the caller before installing a tracer that could hold an invalid instrument.
+type initializingMeter struct {
+	metric.Meter
+	initErr *error
+}
+
+func (m initializingMeter) Float64Histogram(name string, opts ...metric.Float64HistogramOption) (metric.Float64Histogram, error) {
+	h, err := m.Meter.Float64Histogram(name, opts...)
+	if err != nil && m.initErr != nil {
+		*m.initErr = errors.Join(*m.initErr, err)
+	}
+	return h, err
+}
+func (m initializingMeter) Int64Counter(name string, opts ...metric.Int64CounterOption) (metric.Int64Counter, error) {
+	c, err := m.Meter.Int64Counter(name, opts...)
+	if err != nil && m.initErr != nil {
+		*m.initErr = errors.Join(*m.initErr, err)
+	}
+	return c, err
+}

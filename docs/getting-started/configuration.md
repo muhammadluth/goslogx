@@ -10,6 +10,7 @@ goslogx uses functional options. Configure logging, resource identity, telemetry
 | `WithMasking` | Enables automatic log-data masking | goslogx logger |
 | `WithResource` | Sets shared OpenTelemetry resource identity | goslogx managed providers |
 | `WithTracing` | Creates a managed OTLP tracer provider | goslogx |
+| `WithDisabledTracing` | Disables tracing (compatibility alias for `WithTracing(false)`) | Application |
 | `WithMetrics` | Creates a managed OTLP meter provider | goslogx |
 | `WithTracerProvider` | Injects an existing tracer provider | Application |
 | `WithMeterProvider` | Injects an existing meter provider | Application |

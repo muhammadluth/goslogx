@@ -190,6 +190,8 @@ func options(provider goslogx.TelemetryProvider, opts []Option) []otel.Option {
 		responsePropagator = c.responsePropagator
 	}
 	return append(c.options,
+		otel.WithClientIP(c.policy.clientIP),
+		otel.WithoutMetrics(c.metricsDisabled),
 		otel.WithTracerProvider(privateTracerProvider{TracerProvider: tp, serverName: c.serverName, attributes: c.traceAttributes, start: c.start, policy: c.policy}),
 		otel.WithMeterProvider(privateMeterProvider{MeterProvider: mp, attributes: c.attributes}),
 		otel.WithPropagators(propagator),

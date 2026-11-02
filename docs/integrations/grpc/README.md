@@ -3,12 +3,14 @@
 ## INSTALLATION
 
 ```bash
-go get github.com/muhammadluthfi/goslogx/plugins/grpc
+go get github.com/muhammadluth/goslogx/plugins/grpc
 ```
 
 ## UNDERLYING INSTRUMENTATION
 
 The plugin wraps the official `otelgrpc` v0.66.0 stats handlers. `otelgrpc` owns RPC spans, status semantics, message events, propagation, and RPC metrics. goslogx supplies providers, privacy-safe attributes, stable method naming, and signal controls.
+
+## QUICK START
 
 ```go
 server := grpc.NewServer(grpc.StatsHandler(
@@ -23,7 +25,7 @@ conn, err := grpc.NewClient(target,
 
 ## DEFAULT BEHAVIOR
 
-Tracing and metrics are enabled. W3C context uses the supplied provider propagator. Default span names are `gRPC`; raw service and method metadata are omitted until registered with `WithMethodNames`. Status codes remain bounded. Payloads, metadata, endpoints, and raw error descriptions are excluded.
+Tracing and metrics are enabled. W3C context uses the supplied provider propagator. Native RPC span names such as `orders.v1.Orders/Create` and service/method span attributes remain available by default. `WithMethodNames` controls service/method metric dimensions. Status codes remain bounded. Payloads, metadata, endpoints, and raw error descriptions are excluded.
 
 ## SUPPORTED OPTIONS
 
@@ -40,7 +42,7 @@ Tracing and metrics are enabled. W3C context uses the supplied provider propagat
 | Static span attributes | `WithTraceAttributes`, `WithSpanAttributes` | Safe wrapper | none |
 | Static metric attributes | `WithMetricAttributes` | Safe wrapper | none |
 | Dynamic metric attributes | `WithMetricAttributesFn` | Safe wrapper | unset |
-| Stable service/method names | `WithMethodNames` | goslogx policy | none |
+| Service/method metric labels | `WithMethodNames` | goslogx policy | none |
 
 `WithMethodNames` accepts at most 64 registered full methods of at most 256 bytes each. Metric attributes accept bounded `app.channel`, `service.version`, and `deployment.environment.name` strings. Dynamic attributes pass through the same validation.
 
@@ -61,3 +63,17 @@ All relevant v0.66.0 stats-handler options are represented. `WithSpanOptions` is
 ## AUTO-INSTRUMENTATION COEXISTENCE
 
 Install one stats handler per client or server. Do not combine this plugin with another gRPC stats handler that creates OpenTelemetry RPC spans or metrics for the same operation.
+
+## TRACING AND METRICS
+
+Client and server stats handlers preserve native method names, status codes, context and
+optional message-size events. RPC duration and message-size instruments retain the names and
+units of the pinned otelgrpc version. `WithMethodNames` bounds method labels on metrics while
+span methods remain available without an allowlist.
+
+## ADVANCED CONFIGURATION, LIFECYCLE AND TROUBLESHOOTING
+
+Use public-endpoint options when remote context should be linked instead of used as a parent.
+Close clients and gracefully stop servers before flushing application-owned providers. A nil
+provider uses no-op signals. If spans are missing, check stats-handler registration on both
+sides and pass the active RPC context to downstream clients.

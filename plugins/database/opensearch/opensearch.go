@@ -16,6 +16,9 @@ const ScopeName = "github.com/muhammadluth/goslogx/plugins/database/opensearch"
 
 type Option = telemetry.Option
 
+var WithTraceAttributes = telemetry.WithTraceAttributes
+var WithMetricAttributes = telemetry.WithMetricAttributes
+var WithPropagator = telemetry.WithPropagator
 var WithTracing = telemetry.WithTracing
 var WithMetrics = telemetry.WithMetrics
 
@@ -30,7 +33,7 @@ func NewTransport(provider goslogx.TelemetryProvider, base http.RoundTripper, op
 	}
 	tp, mp, prop := telemetry.Resolve(provider, cfg)
 	p := scopedProvider{tp: scopedTracer{tp}, mp: scopedMeter{mp}, prop: prop}
-	return goslogxhttp.NewTransport(p, base, goslogxhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+	return goslogxhttp.NewTransport(p, base, goslogxhttp.WithTraceAttributes(cfg.TraceAttributes...), goslogxhttp.WithMetricAttributes(cfg.MetricAttributes...), goslogxhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
 		operation := "request"
 		switch {
 		case strings.Contains(r.URL.Path, "/_search"):
