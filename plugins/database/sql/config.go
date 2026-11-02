@@ -55,8 +55,12 @@ func WithStatementCapture(v bool) Option { return common(telemetry.WithStatement
 func WithStatementSanitizer(f func(string) string) Option {
 	return common(telemetry.WithStatementSanitizer(f))
 }
-func WithTracing(v bool) Option { return common(telemetry.WithTracing(v)) }
-func WithMetrics(v bool) Option { return common(telemetry.WithMetrics(v)) }
+func WithTracing(v bool) Option     { return common(telemetry.WithTracing(v)) }
+func WithMetrics(v bool) Option     { return common(telemetry.WithMetrics(v)) }
+func WithDBUser(user string) Option { return common(telemetry.WithDBUser(user)) }
+func WithServerEndpoint(address string, port int) Option {
+	return common(telemetry.WithServerEndpoint(address, port))
+}
 func WithTraceAttributes(a ...attribute.KeyValue) Option {
 	return common(telemetry.WithTraceAttributes(a...))
 }

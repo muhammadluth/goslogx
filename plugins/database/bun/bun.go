@@ -52,7 +52,37 @@ func WithPoolName(name string) Option {
 func WithDBName(name string) Option {
 	return func(c *config) {
 		if name != "" && len(name) <= 256 {
+			// db.namespace is stable semantic convention. db.name is retained
+			// for Bun's pinned legacy semantic convention and existing queries.
 			c.attributes = append(c.attributes, attribute.String("db.namespace", name))
+			// Keep legacy db.name on spans only. Emitting both conventions as
+			// metric dimensions duplicates a static time-series dimension.
+			c.policy.TraceAttributes = append(c.policy.TraceAttributes, attribute.String("db.name", name))
+		}
+	}
+}
+
+// WithDBUser adds an explicitly supplied database user to spans only. It never
+// becomes a metric dimension. Use it only when the user name is appropriate for
+// your telemetry policy; do not pass credentials.
+func WithDBUser(user string) Option {
+	return func(c *config) {
+		if user != "" && len(user) <= 256 {
+			c.policy.TraceAttributes = append(c.policy.TraceAttributes, attribute.String("db.user", user))
+		}
+	}
+}
+
+// WithServerAddress adds an explicitly supplied endpoint to spans only. Bun's
+// public DB API does not expose a portable DSN, so goslogx never guesses it.
+func WithServerAddress(address string, port int) Option {
+	return func(c *config) {
+		if address == "" || len(address) > 256 || port < 0 || port > 65535 {
+			return
+		}
+		c.policy.TraceAttributes = append(c.policy.TraceAttributes, attribute.String("server.address", address))
+		if port != 0 {
+			c.policy.TraceAttributes = append(c.policy.TraceAttributes, attribute.Int("server.port", port))
 		}
 	}
 }

@@ -91,6 +91,43 @@ func TestDisabledAndStatementOptIn(t *testing.T) {
 	}
 }
 
+func TestDatabaseDiagnosticMetadataStaysOnSpans(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	defer tp.Shutdown(context.Background())
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	defer mp.Shutdown(context.Background())
+	inst, err := New(providers{tp, mp}, "database", "clickhouse", false,
+		WithDBName("orders"), WithDBUser("diagnostic-user"),
+		WithServerEndpoint("database.internal", 9000), WithCallerEnabled(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, end := inst.Begin(context.Background(), "SELECT", "", trace.SpanKindClient)
+	end(nil)
+	spans := recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatal("database client span missing")
+	}
+	attrs := fmt.Sprint(spans[0].Attributes())
+	for _, wanted := range []string{"db.namespace", "db.name", "diagnostic-user", "database.internal", "server.port", "code.function"} {
+		if !strings.Contains(attrs, wanted) {
+			t.Fatalf("missing %s: %s", wanted, attrs)
+		}
+	}
+	var data metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &data); err != nil {
+		t.Fatal(err)
+	}
+	metricText := fmt.Sprint(data)
+	for _, forbidden := range []string{"diagnostic-user", "database.internal", "code.filepath", "db.name {"} {
+		if strings.Contains(metricText, forbidden) {
+			t.Fatalf("trace metadata in metric dimensions: %s", metricText)
+		}
+	}
+}
+
 func TestIndependentSignalsAndSafeStatements(t *testing.T) {
 	for _, tc := range []struct {
 		name            string

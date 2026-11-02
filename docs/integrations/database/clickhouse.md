@@ -52,3 +52,7 @@ See the [integration policy](../../architecture/integration-policy.md) for allow
 
 Close every result and batch. A span that remains open usually indicates an unconsumed cursor or unfinished batch; Scan errors alone do not close live results. Errors retain native identity for the caller; exported failures use concrete types
 and redacted messages. Providers remain application-owned.
+
+## DIAGNOSTIC METADATA
+
+`WithDBName` emits `db.namespace` and the legacy `db.name` on spans. `WithDBUser`, `WithServerEndpoint`, and `WithCallerEnabled` add explicit diagnostic metadata on spans only; source location capture is opt-in. These values are excluded from metric dimensions.

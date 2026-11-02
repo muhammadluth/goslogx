@@ -29,8 +29,9 @@ func WithMetricAttributes(a ...attribute.KeyValue) Option {
 func WithPropagator(p propagation.TextMapPropagator) Option {
 	return common(telemetry.WithPropagator(p))
 }
-func WithTracing(v bool) Option { return common(telemetry.WithTracing(v)) }
-func WithMetrics(v bool) Option { return common(telemetry.WithMetrics(v)) }
+func WithTracing(v bool) Option     { return common(telemetry.WithTracing(v)) }
+func WithMetrics(v bool) Option     { return common(telemetry.WithMetrics(v)) }
+func WithDBUser(user string) Option { return common(telemetry.WithDBUser(user)) }
 
 // WithSpanNameFormatter maps the native command-event formatter. Return a safe
 // operation label; commands can contain application payloads.

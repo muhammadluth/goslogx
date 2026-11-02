@@ -75,3 +75,7 @@ Register pool observations once; close the pool before shutting down its provide
 Prepared statements retain `pgx.prepare_stmt.name`. `WithQueryParameters` receives formatted
 parameter strings; its result must satisfy your application's privacy policy. A sanitizer changes
 only telemetry and never the arguments sent to PostgreSQL.
+
+## DIAGNOSTIC METADATA
+
+`WithDBName` emits `db.namespace` and the legacy `db.name` on spans. `WithDBUser` adds an explicitly configured user to spans only. The upstream pgx tracer remains responsible for native connection details, query, batch, COPY, prepare, and acquire telemetry.

@@ -55,3 +55,7 @@ Install monitors once on client options before connecting. The driver matches co
 and completions by connection/request identity; the application retains client ownership.
 Close the client before flushing and shutting down providers. Existing monitors cause an error
 so that callers can choose one instrumentation layer.
+
+## DIAGNOSTIC METADATA
+
+`WithDBName` emits `db.namespace` and the legacy `db.name` on spans. `WithDBUser` adds an explicitly configured user on spans only. MongoDB command document capture remains controlled by its command capture and sanitizer options; SQL statement semantics do not apply.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"github.com/muhammadluth/goslogx/internal/integration/telemetry/testkit"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
@@ -71,7 +72,7 @@ func TestDiagnosticOptionsPreserveSanitization(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls := 0
-	if err = Instrument(db, p, WithRecordStackTrace(true), WithServerAddress(false), WithQueryVariables(true), WithStatementCapture(true), WithStatementSanitizer(func(query string) string { calls++; return "UPDATE orders SET value=?" })); err != nil {
+	if err = Instrument(db, p, WithDBName("orders"), WithDBUser("diagnostic-user"), WithServerEndpoint("configured.internal", 5432), WithRecordStackTrace(true), WithServerAddress(false), WithQueryVariables(true), WithStatementCapture(true), WithStatementSanitizer(func(query string) string { calls++; return "UPDATE orders SET value=?" })); err != nil {
 		t.Fatal(err)
 	}
 	failure := errors.New("SECRET")
@@ -82,6 +83,18 @@ func TestDiagnosticOptionsPreserveSanitization(t *testing.T) {
 	spans := p.Recorder.Ended()
 	if calls != 1 || len(spans) != 1 || len(spans[0].Events()) != 1 {
 		t.Fatal("sanitizer or exception duplication", calls, spans)
+	}
+	attributes := fmt.Sprint(spans[0].Attributes())
+	for _, wanted := range []string{"db.namespace", "db.name", "diagnostic-user", "configured.internal", "server.port"} {
+		if !strings.Contains(attributes, wanted) {
+			t.Fatalf("missing %s in %s", wanted, attributes)
+		}
+	}
+	metricText := fmt.Sprint(p.Collect(t))
+	for _, forbidden := range []string{"diagnostic-user", "configured.internal", "db.name {"} {
+		if strings.Contains(metricText, forbidden) {
+			t.Fatalf("trace metadata leaked to metrics: %s", metricText)
+		}
 	}
 	stack := false
 	for _, a := range spans[0].Events()[0].Attributes {

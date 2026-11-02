@@ -37,8 +37,9 @@ func WithMetricAttributes(a ...attribute.KeyValue) Option {
 func WithPropagator(p propagation.TextMapPropagator) Option {
 	return common(telemetry.WithPropagator(p))
 }
-func WithTracing(v bool) Option { return common(telemetry.WithTracing(v)) }
-func WithMetrics(v bool) Option { return common(telemetry.WithMetrics(v)) }
+func WithTracing(v bool) Option     { return common(telemetry.WithTracing(v)) }
+func WithMetrics(v bool) Option     { return common(telemetry.WithMetrics(v)) }
+func WithDBUser(user string) Option { return common(telemetry.WithDBUser(user)) }
 
 // WithAcquireTracing controls native pool acquire spans and their metrics.
 func WithAcquireTracing(v bool) Option {

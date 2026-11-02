@@ -66,3 +66,7 @@ Statements are disabled by default, sanitized with an explicit sanitizer, or raw
 `WithRawStatement(true)`. `WithSQLCommenter(true)` modifies outgoing SQL to carry context, so
 review driver and server support before enabling it. Choose this driver layer or an ORM plugin;
 stacking both creates equivalent query spans. The application closes the pool and providers.
+
+## DIAGNOSTIC METADATA
+
+`WithDBName` emits `db.namespace` and the legacy `db.name` on spans. `WithDBUser` and `WithServerEndpoint` accept explicit diagnostic metadata for spans; values are excluded from metric dimensions. Query text still requires an explicit capture policy. `sqlx` inherits these options through the SQL adapter.

@@ -20,7 +20,7 @@ func TestNativeQueryCaptureMetadataAndSignals(t *testing.T) {
 			failure := errors.New("SECRET connection")
 			db := native.Connect(&native.Options{Addr: "db.internal:5432", MaxRetries: 0, Dialer: func(context.Context, string, string) (net.Conn, error) { return nil, failure }})
 			defer db.Close()
-			err := Instrument(db, p, nil, WithTracing(signals[0]), WithMetrics(signals[1]), WithDBName("orders"), WithPoolName("primary"), WithStatementCapture(true), WithStatementSanitizer(func(string) string { return "SELECT ?" }), WithCallerEnabled(true), WithTraceAttributes(attribute.String("app.component", "store")), WithMetricAttributes(attribute.String("app.region", "test")))
+			err := Instrument(db, p, nil, WithTracing(signals[0]), WithMetrics(signals[1]), WithDBName("orders"), WithDBUser("diag-user"), WithServerAddress("configured.internal", 5432), WithPoolName("primary"), WithStatementCapture(true), WithStatementSanitizer(func(string) string { return "SELECT ?" }), WithCallerEnabled(true), WithTraceAttributes(attribute.String("app.component", "store")), WithMetricAttributes(attribute.String("app.region", "test")))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -36,13 +36,16 @@ func TestNativeQueryCaptureMetadataAndSignals(t *testing.T) {
 			}
 			if signals[0] {
 				attrs := fmt.Sprint(spans[0].Attributes())
-				for _, want := range []string{"db.internal", "5432", "SELECT ?", "code.function", "app.component"} {
+				for _, want := range []string{"configured.internal", "diag-user", "db.name", "db.namespace", "5432", "SELECT ?", "code.function", "app.component"} {
 					if !strings.Contains(attrs, want) {
 						t.Fatal("lost metadata", want, attrs)
 					}
 				}
 			}
 			data := p.Collect(t)
+			if strings.Contains(fmt.Sprint(data), "diag-user") || strings.Contains(fmt.Sprint(data), "configured.internal") {
+				t.Fatal("trace-only metadata became metric dimensions")
+			}
 			if (len(data.ScopeMetrics) > 0) != signals[1] {
 				t.Fatal("metrics mode")
 			}

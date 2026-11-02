@@ -16,6 +16,7 @@ import (
 	"github.com/go-pg/pg/v10"
 	"github.com/go-pg/pg/v10/orm"
 	"github.com/muhammadluth/goslogx"
+	"github.com/muhammadluth/goslogx/internal/caller"
 	"github.com/muhammadluth/goslogx/internal/integration/privacy"
 	"github.com/muhammadluth/goslogx/internal/integration/telemetry"
 
@@ -32,11 +33,12 @@ const instrumentationScope = "github.com/muhammadluth/goslogx/plugins/database/p
 type Option func(*config)
 
 type config struct {
-	attributes []attribute.KeyValue
-	statement  bool
-	policy     telemetry.Config
-	caller     bool
-	poolName   string
+	attributes         []attribute.KeyValue
+	statement          bool
+	policy             telemetry.Config
+	caller             bool
+	poolName           string
+	endpointConfigured bool
 }
 
 // WithPoolName distinguishes application-owned pools using a fixed name.
@@ -52,6 +54,30 @@ func WithDBName(name string) Option {
 	return func(c *config) {
 		if name != "" && len(name) <= 256 {
 			c.attributes = append(c.attributes, attribute.String("db.namespace", name))
+			c.policy.TraceAttributes = append(c.policy.TraceAttributes, attribute.String("db.name", name))
+		}
+	}
+}
+
+// WithDBUser explicitly emits a database user on spans only.
+func WithDBUser(user string) Option {
+	return func(c *config) {
+		if user != "" && len(user) <= 256 {
+			c.policy.TraceAttributes = append(c.policy.TraceAttributes, attribute.String("db.user", user))
+		}
+	}
+}
+
+// WithServerAddress overrides or supplements native host metadata on spans.
+func WithServerAddress(address string, port int) Option {
+	return func(c *config) {
+		if address == "" || len(address) > 256 || port < 0 || port > 65535 {
+			return
+		}
+		c.endpointConfigured = true
+		c.policy.TraceAttributes = append(c.policy.TraceAttributes, attribute.String("server.address", address))
+		if port != 0 {
+			c.policy.TraceAttributes = append(c.policy.TraceAttributes, attribute.Int("server.port", port))
 		}
 	}
 }
@@ -131,7 +157,7 @@ func (h *queryHook) BeforeQuery(ctx context.Context, event *pg.QueryEvent) (cont
 		name = "QUERY"
 	}
 	attrs := append(h.spanAttributes(event, operation), h.config.policy.TraceAttributes...)
-	if db, ok := event.DB.(*pg.DB); ok && db != nil {
+	if db, ok := event.DB.(*pg.DB); ok && db != nil && !h.config.endpointConfigured {
 		opts := db.Options()
 		if host, port, err := net.SplitHostPort(opts.Addr); err == nil {
 			attrs = append(attrs, attribute.String("server.address", host))
@@ -146,15 +172,33 @@ func (h *queryHook) BeforeQuery(ctx context.Context, event *pg.QueryEvent) (cont
 		}
 	}
 	if h.config.caller {
-		if pc, file, line, ok := runtime.Caller(2); ok {
-			attrs = append(attrs, attribute.String("code.filepath", file), attribute.Int("code.lineno", line))
-			if fn := runtime.FuncForPC(pc); fn != nil {
-				attrs = append(attrs, attribute.String("code.function", fn.Name()))
-			}
+		if frame, _, ok := caller.Find(48, applicationFrame); ok {
+			attrs = append(attrs,
+				attribute.String("code.filepath", frame.File),
+				attribute.Int("code.lineno", frame.Line),
+				attribute.String("code.function", frame.Function),
+			)
 		}
 	}
 	ctx, _ = h.tracer.Start(ctx, name, trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(attrs...))
 	return ctx, nil
+}
+
+func applicationFrame(frame runtime.Frame) bool {
+	if frame.File == "" || frame.Function == "" {
+		return false
+	}
+	for _, prefix := range []string{
+		"runtime.", "reflect.", "testing.",
+		"github.com/go-pg/pg/v10.", "github.com/go-pg/pg/v10/",
+		"github.com/muhammadluth/goslogx/internal/caller.",
+		"github.com/muhammadluth/goslogx/plugins/database/pg.(*queryHook).",
+	} {
+		if strings.HasPrefix(frame.Function, prefix) {
+			return false
+		}
+	}
+	return true
 }
 
 func (h *queryHook) AfterQuery(ctx context.Context, event *pg.QueryEvent) error {

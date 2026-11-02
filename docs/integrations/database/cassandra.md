@@ -52,3 +52,7 @@ See the [integration policy](../../architecture/integration-policy.md) for allow
 
 Configure observers before opening a session, close iterators, then close the session before telemetry shutdown. Existing observers are rejected; combine them explicitly in the application if needed. Errors retain native identity for the caller; exported failures use concrete types
 and redacted messages. Providers remain application-owned.
+
+## DIAGNOSTIC METADATA
+
+`WithDBName` emits `db.namespace` and the legacy `db.name` on spans. `WithDBUser` accepts explicit span-only metadata. The driver observer supplies the actual host and port. It does not expose reliable application caller or pool statistics, so this plugin does not fabricate them.

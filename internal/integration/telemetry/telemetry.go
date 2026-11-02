@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +33,7 @@ type Config struct {
 	StatementSanitizer                   func(string) string
 	Propagator                           propagation.TextMapPropagator
 	TraceAttributes, MetricAttributes    []attribute.KeyValue
+	CallerEnabled                        bool
 	TracingDisabled, MetricsDisabled     bool
 	OnError                              func(error)
 }
@@ -39,10 +41,43 @@ type Config struct {
 func WithDestinationNormalizer(f func(string) string) Option {
 	return func(c *Config) { c.Normalizer = f }
 }
-func WithDBName(name string) Option        { return func(c *Config) { c.Namespace = static(name) } }
-func WithConsumerName(name string) Option  { return func(c *Config) { c.Consumer = static(name) } }
-func WithConsumerGroup(name string) Option { return func(c *Config) { c.Group = static(name) } }
-func WithClientID(name string) Option      { return func(c *Config) { c.ClientID = static(name) } }
+func WithDBName(name string) Option {
+	return func(c *Config) {
+		c.Namespace = static(name)
+		if c.Namespace != "" {
+			c.TraceAttributes = append(c.TraceAttributes, attribute.String("db.name", c.Namespace))
+		}
+	}
+}
+
+// WithDBUser emits an explicitly configured user on spans only.
+func WithDBUser(user string) Option {
+	return func(c *Config) {
+		if user != "" && len(user) <= 256 {
+			c.TraceAttributes = append(c.TraceAttributes, attribute.String("db.user", user))
+		}
+	}
+}
+
+// WithServerEndpoint emits a configured server endpoint on spans only.
+func WithServerEndpoint(address string, port int) Option {
+	return func(c *Config) {
+		if address == "" || len(address) > 256 || port < 0 || port > 65535 {
+			return
+		}
+		c.TraceAttributes = append(c.TraceAttributes, attribute.String("server.address", address))
+		if port != 0 {
+			c.TraceAttributes = append(c.TraceAttributes, attribute.Int("server.port", port))
+		}
+	}
+}
+
+// WithCallerEnabled captures the first application frame for native wrappers.
+// Source path information can be sensitive, so this is opt-in.
+func WithCallerEnabled(enabled bool) Option { return func(c *Config) { c.CallerEnabled = enabled } }
+func WithConsumerName(name string) Option   { return func(c *Config) { c.Consumer = static(name) } }
+func WithConsumerGroup(name string) Option  { return func(c *Config) { c.Group = static(name) } }
+func WithClientID(name string) Option       { return func(c *Config) { c.ClientID = static(name) } }
 func WithStatementCapture(enabled bool) Option {
 	return func(c *Config) { c.StatementCapture = enabled }
 }
@@ -261,6 +296,9 @@ func (t *Instrumentation) BeginCount(ctx context.Context, op, destination string
 		}
 	}
 	spanAttrs := append(append([]attribute.KeyValue(nil), t.Config.TraceAttributes...), attrs...)
+	if !t.messaging && t.Config.CallerEnabled {
+		spanAttrs = append(spanAttrs, callerAttributes()...)
+	}
 	attrs = append(attrs, t.Config.MetricAttributes...)
 	ctx, span := t.Tracer.Start(ctx, name, trace.WithSpanKind(kind), trace.WithAttributes(spanAttrs...))
 	started := time.Now()
@@ -292,6 +330,27 @@ func (t *Instrumentation) BeginCount(ctx context.Context, op, destination string
 			}
 		})
 	}
+}
+
+func callerAttributes() []attribute.KeyValue {
+	var pcs [24]uintptr
+	n := runtime.Callers(2, pcs[:])
+	frames := runtime.CallersFrames(pcs[:n])
+	for {
+		frame, more := frames.Next()
+		if !strings.Contains(frame.Function, "github.com/muhammadluth/goslogx/") &&
+			!strings.HasPrefix(frame.Function, "runtime.") && frame.File != "" {
+			return []attribute.KeyValue{
+				attribute.String("code.function", frame.Function),
+				attribute.String("code.filepath", frame.File),
+				attribute.Int("code.lineno", frame.Line),
+			}
+		}
+		if !more {
+			break
+		}
+	}
+	return nil
 }
 
 // Process extracts the configured propagator and measures handler execution.

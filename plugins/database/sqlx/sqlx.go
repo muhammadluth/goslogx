@@ -11,6 +11,8 @@ import (
 type Option = goslogxsql.Option
 
 var WithDBName = goslogxsql.WithDBName
+var WithDBUser = goslogxsql.WithDBUser
+var WithServerEndpoint = goslogxsql.WithServerEndpoint
 var WithStatementCapture = goslogxsql.WithStatementCapture
 var WithStatementSanitizer = goslogxsql.WithStatementSanitizer
 var WithRawStatement = goslogxsql.WithRawStatement

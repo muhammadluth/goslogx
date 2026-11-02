@@ -40,6 +40,8 @@ Instruments, units and SQL pool observations are exactly those of the [SQL integ
 ## SUPPORTED OPTIONS AND ADVANCED CONFIGURATION
 
 Use `WithTracing`, `WithMetrics`, `WithDBName`, `WithTraceAttributes` and `WithMetricAttributes`.
+`WithDBUser` and `WithServerEndpoint` forward explicit span-only metadata to the
+database/sql adapter. `WithDBName` also emits legacy `db.name` on spans.
 Statement capture is disabled by default. `WithStatementCapture(true)` requires
 `WithStatementSanitizer(redactSQL)`; `WithRawStatement(true)` is an explicit sensitive-data opt-in.
 See the [integration policy](../../architecture/integration-policy.md) for allowed metric dimensions.

@@ -36,8 +36,14 @@ Use either this plugin or another instrumentation layer for the same client oper
 `WithQueryStatement(true)` or `WithStatementCapture(true)` requires
 `WithStatementSanitizer(redactSQL)`. go-pg supplies formatted SQL, which can contain bound values.
 `WithRawStatement(true)` permits unsanitized diagnostic capture; it can expose user data.
-`WithCallerEnabled(true)` adds source metadata. Use `WithTraceAttributes` and
+`WithCallerEnabled(true)` adds the first application call frame as `code.function`,
+`code.filepath`, and `code.lineno`, skipping go-pg driver frames. Source paths can
+contain local deployment details, so enable this only where permitted. Use `WithTraceAttributes` and
 `WithMetricAttributes` to configure span metadata separately from bounded static metric labels.
+`WithDBName` emits both `db.namespace` and the legacy `db.name` on spans.
+`WithDBUser("app_user")` and `WithServerAddress("db.internal", 5432)` explicitly
+add user and endpoint metadata to spans. These values are excluded from metric
+dimensions. Avoid putting credentials or tenant identifiers in these options.
 
 ## LIFECYCLE AND TROUBLESHOOTING
 

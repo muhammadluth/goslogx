@@ -30,8 +30,12 @@ func WithMetricAttributes(a ...attribute.KeyValue) Option {
 func WithPropagator(p propagation.TextMapPropagator) Option {
 	return common(telemetry.WithPropagator(p))
 }
-func WithTracing(v bool) Option { return common(telemetry.WithTracing(v)) }
-func WithMetrics(v bool) Option { return common(telemetry.WithMetrics(v)) }
+func WithTracing(v bool) Option     { return common(telemetry.WithTracing(v)) }
+func WithMetrics(v bool) Option     { return common(telemetry.WithMetrics(v)) }
+func WithDBUser(user string) Option { return common(telemetry.WithDBUser(user)) }
+func WithServerEndpoint(address string, port int) Option {
+	return common(telemetry.WithServerEndpoint(address, port))
+}
 
 // WithRecordStackTrace enables upstream exception stack frames. Error text remains redacted.
 func WithRecordStackTrace(enabled bool) Option {

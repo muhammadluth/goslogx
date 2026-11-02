@@ -1,8 +1,13 @@
 package goslogx
 
 import (
+	"github.com/muhammadluth/goslogx/internal/caller"
+	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+
+	"go.uber.org/zap/zapcore"
 )
 
 const (
@@ -15,31 +20,50 @@ var internalPackages = []string{
 	"/goslogx.",
 }
 
+// EncodeCaller writes an import-qualified source location. Zap's short caller
+// encoder removes the module path, which makes logs ambiguous across services.
+func EncodeCaller(caller zapcore.EntryCaller, enc zapcore.PrimitiveArrayEncoder) {
+	if !caller.Defined {
+		enc.AppendString("unknown:0")
+		return
+	}
+	if source := callerSource(caller); source != "" {
+		enc.AppendString(source)
+		return
+	}
+	enc.AppendString(filepath.ToSlash(caller.File) + ":" + strconv.Itoa(caller.Line))
+}
+
+func callerSource(caller zapcore.EntryCaller) string {
+	if caller.PC == 0 || caller.File == "" {
+		return ""
+	}
+	fn := runtime.FuncForPC(caller.PC)
+	if fn == nil {
+		return ""
+	}
+	name := fn.Name()
+	packagePath := name
+	if index := strings.Index(packagePath, ".("); index >= 0 {
+		packagePath = packagePath[:index]
+	} else if index := strings.LastIndex(packagePath, "."); index >= 0 {
+		packagePath = packagePath[:index]
+	} else {
+		return ""
+	}
+	return packagePath + "/" + filepath.Base(caller.File) + ":" + strconv.Itoa(caller.Line)
+}
+
 // detectCallerSkip finds the first caller outside goslogx wrappers
 // and returns the correct skip value for zap.AddCallerSkip().
 func detectCallerSkip() int {
-	for depth := 1; depth < maxCallerDepth; depth++ {
-		pc, _, _, ok := runtime.Caller(depth)
-		if !ok {
-			break
-		}
-
-		fn := runtime.FuncForPC(pc)
-		if fn == nil {
-			continue
-		}
-
-		funcName := fn.Name()
-
-		if isInternalPackage(funcName) {
-			continue
-		}
-
-		// runtime.Caller() includes this function itself,
-		// while zap.AddCallerSkip() starts from the logger call.
+	_, depth, ok := caller.Find(maxCallerDepth-1, func(frame runtime.Frame) bool {
+		return frame.Function != "" && !isInternalPackage(frame.Function)
+	})
+	if ok {
+		// zap.AddCallerSkip starts from the logger call.
 		return depth - 1
 	}
-
 	return defaultCallerSkip
 }
 

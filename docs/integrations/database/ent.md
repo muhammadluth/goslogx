@@ -48,3 +48,7 @@ See the [integration policy](../../architecture/integration-policy.md) for allow
 
 Wrap before creating the generated client, finish each transaction, and close the driver normally. Use the Ent layer or SQL-layer instrumentation for queries. Errors retain native identity for the caller; exported failures use concrete types
 and redacted messages. Providers remain application-owned.
+
+## DIAGNOSTIC METADATA
+
+`WithDBName` emits `db.namespace` and the legacy `db.name` on spans. `WithDBUser`, `WithServerEndpoint`, and `WithCallerEnabled` add explicit diagnostic metadata on spans only. The Ent driver interface does not expose reliable pool or rows-affected statistics.

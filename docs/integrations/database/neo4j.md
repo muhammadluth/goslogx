@@ -55,3 +55,7 @@ See the [integration policy](../../architecture/integration-policy.md) for allow
 
 Consume results and finish transactions before closing the session. Use a driver-level integration separately for operations outside the wrapped session. Errors retain native identity for the caller; exported failures use concrete types
 and redacted messages. Providers remain application-owned.
+
+## DIAGNOSTIC METADATA
+
+`WithDBName` emits `db.namespace` and the legacy `db.name` on spans. `WithDBUser`, `WithServerEndpoint`, and `WithCallerEnabled` add explicit diagnostic metadata on spans only. The session wrapper does not expose reliable pool statistics.

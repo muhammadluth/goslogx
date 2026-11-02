@@ -28,6 +28,9 @@ var WithMetricAttributes = telemetry.WithMetricAttributes
 var WithPropagator = telemetry.WithPropagator
 var WithTracing = telemetry.WithTracing
 var WithMetrics = telemetry.WithMetrics
+var WithDBUser = telemetry.WithDBUser
+var WithServerEndpoint = telemetry.WithServerEndpoint
+var WithCallerEnabled = telemetry.WithCallerEnabled
 
 type Conn struct {
 	driver.Conn

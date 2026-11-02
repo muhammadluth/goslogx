@@ -57,3 +57,7 @@ Stack frames can disclose local source paths, so enable them only under an appro
 Install before serving queries. Close the SQL pool before shutting down telemetry. If spans
 appear twice, choose GORM callbacks or instrumented SQL drivers for the same query. An existing
 native GORM OTel plugin is rejected. Keep GORM's own SQL logger configuration separate.
+
+## DIAGNOSTIC METADATA
+
+`WithDBName` emits `db.namespace` and the legacy `db.name` on spans. `WithDBUser` and `WithServerEndpoint` add explicit span-only metadata; `WithServerAddress(false)` still disables upstream native address collection. These fields are excluded from metric dimensions.

@@ -29,7 +29,7 @@ func TestNativeMetricsAndIndependentSignals(t *testing.T) {
 			}
 			db := native.NewDB(raw, pgdialect.New())
 			defer db.Close()
-			err = Instrument(db, p, WithTracing(signals[0]), WithMetrics(signals[1]), WithDBName("orders"), WithPoolName("primary"), WithAttributes(attribute.String("db.name", "orders"), attribute.String("app.token", "SECRET")), WithStatementCapture(true), WithStatementSanitizer(func(string) string { return "SELECT ?" }), WithCallerEnabled(true), WithTraceAttributes(attribute.String("app.component", "store")), WithMetricAttributes(attribute.String("app.region", "test")), WithSpanNameFormatter(func(*native.QueryEvent) string { return "lookup" }))
+			err = Instrument(db, p, WithTracing(signals[0]), WithMetrics(signals[1]), WithDBName("orders"), WithDBUser("telemetry-user"), WithServerAddress("postgres.internal", 5432), WithPoolName("primary"), WithAttributes(attribute.String("db.name", "orders"), attribute.String("app.token", "SECRET")), WithStatementCapture(true), WithStatementSanitizer(func(string) string { return "SELECT ?" }), WithCallerEnabled(true), WithTraceAttributes(attribute.String("app.component", "store")), WithMetricAttributes(attribute.String("app.region", "test")), WithSpanNameFormatter(func(*native.QueryEvent) string { return "lookup" }))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -48,13 +48,16 @@ func TestNativeMetricsAndIndependentSignals(t *testing.T) {
 					t.Fatal("native formatter")
 				}
 				attrs := fmt.Sprint(spans[0].Attributes())
-				for _, want := range []string{"SELECT ?", "db.name", "code.function", "app.component"} {
+				for _, want := range []string{"SELECT ?", "db.name", "db.namespace", "db.user", "server.address", "server.port", "code.function", "app.component"} {
 					if !strings.Contains(attrs, want) {
 						t.Fatal("attribute lost", want, attrs)
 					}
 				}
 			}
 			data := p.Collect(t)
+			if strings.Contains(fmt.Sprint(data), "telemetry-user") || strings.Contains(fmt.Sprint(data), "postgres.internal") {
+				t.Fatal("trace-only database endpoint leaked into metrics", data)
+			}
 			if (len(data.ScopeMetrics) > 0) != signals[1] {
 				t.Fatal("metrics toggle")
 			}

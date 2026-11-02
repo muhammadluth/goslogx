@@ -49,12 +49,16 @@ Use this option while migrating dashboards; do not sum both timing instruments.
 
 ## SUPPORTED OPTIONS AND ADVANCED CONFIGURATION
 
-Use `WithTracing` and `WithMetrics` to control signals independently. `WithDBName` sets a static
-namespace. `WithAttributes` forwards safe static native attributes; prefer `WithTraceAttributes`
-and `WithMetricAttributes` to distinguish span metadata from metric dimensions.
+Use `WithTracing` and `WithMetrics` to control signals independently. `WithDBName` emits stable
+`db.namespace` on spans and metrics plus the pinned Bun-compatible `db.name` on spans. It avoids
+duplicating the two names as metric dimensions. `WithAttributes` forwards safe static native
+attributes; prefer `WithTraceAttributes` and `WithMetricAttributes` to distinguish span metadata
+from metric dimensions.
 
 ```go
 err := goslogxbun.Instrument(db, logger,
+	goslogxbun.WithDBUser("readonly-observability"),
+	goslogxbun.WithServerAddress("postgres.internal", 5432),
     goslogxbun.WithStatementCapture(true),
     goslogxbun.WithStatementSanitizer(redactSQL),
     goslogxbun.WithCallerEnabled(true),
@@ -64,7 +68,10 @@ err := goslogxbun.Instrument(db, logger,
 `WithQueryStatement(true)` also enables statement capture. Capture requires a sanitizer or
 `WithRawStatement(true)`. Bun may format bound values before sanitization; your sanitizer must
 handle literals, comments and generated queries. Raw capture can expose credentials and user
-data. Caller capture adds source paths and runtime stack inspection.
+data. Caller capture adds source paths and runtime stack inspection. `WithDBUser` and
+`WithServerAddress` are explicit trace-only diagnostic attributes: they are never metric labels.
+goslogx does not infer either value from a DSN, because that can expose credentials or nonportable
+driver details.
 
 ## LIFECYCLE AND TROUBLESHOOTING
 
